@@ -1,0 +1,186 @@
+use ratatui::{
+    buffer::Buffer,
+    layout::Rect,
+    style::{Color, Style},
+    widgets::{Block, Borders, Clear},
+    Frame,
+};
+
+use crate::app::App;
+use crate::material::Material;
+use crate::world::World;
+
+/// Draw the whole frame: filled-cell material grid + a status line + optional
+/// material-picker overlay.
+pub fn draw(frame: &mut Frame, world: &World, app: &App) {
+    let area = frame.area();
+    draw_grid(frame, world, app, &area);
+    draw_status(frame, app, &area);
+    if app.picker_open {
+        draw_picker(frame, &area, app);
+    }
+}
+
+fn draw_grid(frame: &mut Frame, world: &World, _app: &App, area: &Rect) {
+    let buf = frame.buffer_mut();
+    let gw = world.width.min(area.width as usize);
+    let grid_rows = (area.height as usize).saturating_sub(1);
+    let tick = world.tick();
+
+    // Half-block rendering: each terminal row holds two world rows. The upper
+    // half-block glyph (▀) paints the top world cell as fg, bottom as bg.
+    for cy in 0..grid_rows {
+        let wtop = cy * 2;
+        let wbot = wtop + 1;
+        if wbot >= world.height {
+            break;
+        }
+        for cx in 0..gw {
+            let top = world.get(cx, wtop);
+            let bot = world.get(cx, wbot);
+            let tc = top.color(world.seed_at(cx, wtop), world.life_at(cx, wtop), tick);
+            let bc = bot.color(world.seed_at(cx, wbot), world.life_at(cx, wbot), tick);
+            if let Some(cell) = buf.cell_mut((area.x + cx as u16, area.y + cy as u16)) {
+                cell.set_char('▀');
+                cell.set_fg(tc);
+                cell.set_bg(bc);
+            }
+        }
+    }
+}
+
+fn draw_status(frame: &mut Frame, app: &App, area: &Rect) {
+    let buf = frame.buffer_mut();
+    let sy = area.y + area.height - 1;
+    let bg = Color::Rgb(16, 18, 26);
+    let fg = Color::Rgb(210, 214, 224);
+    let accent = Color::Rgb(255, 220, 120);
+
+    // fill the row's background
+    for x in 0..area.width {
+        if let Some(cell) = buf.cell_mut((area.x + x, sy)) {
+            cell.set_char(' ');
+            cell.set_bg(bg);
+        }
+    }
+
+    let name = app.selected.name();
+    let bar = brush_bar(app.brush);
+    let paused = if app.paused { "   ‖ PAUSED" } else { "" };
+    let s = format!(
+        "  ▀ {name}   Brush {bar}   Tab=Materials   Wheel/Arrows/[]=Size   Space=Pause  C=Clear  Q=Quit{paused}"
+    );
+
+    for (i, ch) in s.chars().enumerate() {
+        let x = area.x + i as u16;
+        if x >= area.x + area.width {
+            break;
+        }
+        if let Some(cell) = buf.cell_mut((x, sy)) {
+            cell.set_char(ch);
+            cell.set_fg(fg);
+            cell.set_bg(bg);
+        }
+    }
+
+    // tint the swatch ▀ (col 2) with the selected material's colour, and the
+    // name with the accent colour so the active material pops.
+    let swatch_col = app.selected.color(0, 128, 0);
+    if let Some(cell) = buf.cell_mut((area.x + 2, sy)) {
+        cell.set_fg(swatch_col);
+    }
+    for (k, _) in name.chars().enumerate() {
+        if let Some(cell) = buf.cell_mut((area.x + 4 + k as u16, sy)) {
+            cell.set_fg(accent);
+        }
+    }
+}
+
+/// Fixed-size dot gauge for the brush radius (0..=8).
+fn brush_bar(b: usize) -> String {
+    (0..=8)
+        .map(|i| if i <= b { '●' } else { '·' })
+        .collect()
+}
+
+/// Centred rect for the picker popup, clamped to the terminal.
+pub fn picker_rect(w: u16, h: u16) -> Rect {
+    let pw: u16 = 28;
+    let ph: u16 = (Material::ALL.len() as u16) + 2; // items + border rows
+    let pw = pw.min(w.saturating_sub(2));
+    let ph = ph.min(h.saturating_sub(2));
+    let x = w.saturating_sub(pw) / 2;
+    let y = h.saturating_sub(ph) / 2;
+    Rect::new(x, y, pw, ph)
+}
+
+fn draw_picker(frame: &mut Frame, area: &Rect, app: &App) {
+    let popup = picker_rect(area.width, area.height);
+
+    // wipe anything behind, then draw the framed panel — do this before the
+    // mutable buffer borrow below.
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Materials — Tab/Enter to pick, Esc to close ")
+        .style(Style::default().fg(Color::Rgb(210, 214, 224)).bg(Color::Rgb(18, 20, 30)));
+    frame.render_widget(block, popup);
+
+    let buf = frame.buffer_mut();
+    let accent = Color::Rgb(255, 220, 120);
+    let bright = Color::Rgb(255, 236, 190);
+    let dim = Color::Rgb(150, 156, 172);
+    let base_bg = Color::Rgb(18, 20, 30);
+    let hi_bg = Color::Rgb(44, 48, 66);
+
+    let inner_x = popup.x + 1;
+    let inner_w = popup.width.saturating_sub(2);
+
+    for (i, &m) in Material::ALL.iter().enumerate() {
+        let y = popup.y + 1 + i as u16;
+        let selected = i == app.picker_cursor;
+
+        // row background
+        for dx in 0..inner_w {
+            if let Some(cell) = buf.cell_mut((inner_x + dx, y)) {
+                cell.set_bg(if selected { hi_bg } else { base_bg });
+            }
+        }
+
+        // cursor marker
+        putc(buf, inner_x, y, if selected { '▶' } else { ' ' }, accent, base_bg);
+
+        // colour swatch
+        putc(buf, inner_x + 2, y, '▀', m.color(0, 128, 0), base_bg);
+
+        // name
+        for (k, ch) in m.name().chars().enumerate() {
+            putc(
+                buf,
+                inner_x + 4 + k as u16,
+                y,
+                ch,
+                if selected { bright } else { Color::Rgb(210, 214, 224) },
+                base_bg,
+            );
+        }
+
+        // hotkey (if any) on the right edge
+        if let Some((key, _)) = Material::PALETTE.iter().find(|(_, mm)| *mm == m) {
+            let label = format!("[{key}]");
+            let base = inner_x + inner_w.saturating_sub(label.len() as u16);
+            for (k, ch) in label.chars().enumerate() {
+                putc(buf, base + k as u16, y, ch, dim, base_bg);
+            }
+        }
+    }
+}
+
+/// Safely write a single glyph with foreground + background.
+fn putc(buf: &mut Buffer, x: u16, y: u16, ch: char, fg: Color, bg: Color) {
+    if let Some(cell) = buf.cell_mut((x, y)) {
+        cell.set_char(ch);
+        cell.set_fg(fg);
+        cell.set_bg(bg);
+    }
+}
