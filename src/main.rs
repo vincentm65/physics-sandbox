@@ -5,12 +5,13 @@ use crossterm::{
     cursor,
     event::{self, Event},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{backend::CrosstermBackend, Terminal};
+use ratatui::{Terminal, backend::CrosstermBackend};
 
 mod app;
 mod material;
+mod scene_manager;
 mod selftest;
 mod ui;
 mod world;
@@ -22,6 +23,21 @@ type Backend = CrosstermBackend<io::Stdout>;
 
 const POLL_WAIT: Duration = Duration::from_millis(15);
 const FRAME: Duration = Duration::from_millis(16);
+
+struct TerminalGuard;
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let mut stdout = stdout();
+        let _ = execute!(
+            stdout,
+            LeaveAlternateScreen,
+            event::DisableMouseCapture,
+            cursor::Show
+        );
+    }
+}
 
 fn main() -> io::Result<()> {
     // `physics-sandbox --selftest` runs headless simulation checks.
@@ -38,6 +54,7 @@ fn main() -> io::Result<()> {
         event::EnableMouseCapture,
         cursor::Hide
     )?;
+    let _terminal_guard = TerminalGuard;
 
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
@@ -45,22 +62,9 @@ fn main() -> io::Result<()> {
     let size = terminal.size()?;
     let usable = (size.height as usize).saturating_sub(1);
     let mut world = World::new(size.width as usize, usable.saturating_mul(2));
+    world.load_scene(app.scene);
 
-    // Seed a little starting scene so it isn't empty on launch.
-    seed_scene(&mut world);
-
-    let result = run(&mut terminal, &mut world, &mut app);
-
-    // Restore the terminal no matter what.
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        event::DisableMouseCapture,
-        cursor::Show
-    )?;
-    terminal.show_cursor()?;
-    result
+    run(&mut terminal, &mut world, &mut app)
 }
 
 fn run(terminal: &mut Terminal<Backend>, world: &mut World, app: &mut App) -> io::Result<()> {
@@ -113,32 +117,6 @@ fn run(terminal: &mut Terminal<Backend>, world: &mut World, app: &mut App) -> io
                     return Ok(());
                 }
             }
-        }
-    }
-}
-
-fn seed_scene(world: &mut World) {
-    let w = world.width;
-    let h = world.height;
-    if w < 10 || h < 6 {
-        return;
-    }
-    let ground = h - 2;
-    // stone floor
-    for x in 0..w {
-        world.paint(x, ground, material::Material::Wall);
-    }
-    // a wooden block to burn
-    let wx = w / 2;
-    for y in (ground - 6)..ground {
-        for x in (wx - 2)..(wx + 2) {
-            world.paint(x, y, material::Material::Wood);
-        }
-    }
-    // a sand pile on the left
-    for y in (ground - 4)..ground {
-        for x in 3..9 {
-            world.paint(x, y, material::Material::Sand);
         }
     }
 }

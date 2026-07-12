@@ -1,10 +1,11 @@
 use ratatui::style::Color;
+use serde::{Deserialize, Serialize};
 
 /// Every substance in the sandbox.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Material {
     Empty,
-    Wall,
+    Stone,
     Wood,
     Sand,
     Water,
@@ -16,6 +17,11 @@ pub enum Material {
     Ember,
     Ash,
     Smoke,
+    Salt,
+    Ice,
+    Gunpowder,
+    Plant,
+    Mercury,
 }
 
 use Material::*;
@@ -23,46 +29,34 @@ use Material::*;
 impl Material {
     /// `[key, material]` pairs for the on-screen palette.
     pub const PALETTE: [(char, Material); 10] = [
-        ('1', Sand),
+        ('1', Salt),
         ('2', Water),
-        ('3', Wall),
+        ('3', Stone),
         ('4', Wood),
         ('5', Fire),
         ('6', Lava),
         ('7', Oil),
         ('8', Acid),
-        ('9', Steam),
+        ('9', Mercury),
         ('0', Empty),
     ];
 
     /// Every material, grouped by phase, in the order the picker lists them.
-    /// (Ember/Ash/Smoke have no number key, so the picker is the only way to
+    /// (Ice, Gunpowder, Plant have no number key, so the picker is the only way to
     ///  reach them.)
-    pub const ALL: [Material; 13] = [
+    pub const ALL: [Material; 18] = [
         // powders / granular
-        Sand,
-        Ash,
-        // liquids
-        Water,
-        Oil,
-        Acid,
-        Lava,
-        // solids
-        Wall,
-        Wood,
-        // fire & gases
-        Fire,
-        Ember,
-        Smoke,
-        Steam,
-        // tools
+        Sand, Ash, Salt, Gunpowder, // liquids
+        Water, Oil, Acid, Lava, Mercury, // solids
+        Stone, Wood, Ice, Plant, // fire & gases
+        Fire, Ember, Steam, Smoke, // tools
         Empty,
     ];
 
     pub fn name(self) -> &'static str {
         match self {
             Empty => "Eraser",
-            Wall => "Stone",
+            Stone => "Stone",
             Wood => "Wood",
             Sand => "Sand",
             Water => "Water",
@@ -74,6 +68,11 @@ impl Material {
             Ember => "Ember",
             Ash => "Ash",
             Smoke => "Smoke",
+            Salt => "Salt",
+            Ice => "Ice",
+            Gunpowder => "Gunpowder",
+            Plant => "Plant",
+            Mercury => "Mercury",
         }
     }
 
@@ -84,27 +83,77 @@ impl Material {
             Steam => 1,
             Oil => 2,
             Water => 3,
-            Acid => 4,
+            Ice => 2,
             Ash => 4,
+            Salt => 6,
             Sand => 5,
+            Wood => 5,
+            Plant => 5,
             Ember => 6,
             Lava => 6,
+            Stone => 7,
+            Gunpowder => 8,
+            Mercury => 12,
             _ => 0,
         }
     }
 
     pub fn is_liquid(self) -> bool {
-        matches!(self, Water | Oil | Acid | Lava)
+        matches!(self, Water | Oil | Acid | Lava | Mercury)
     }
     pub fn is_empty(self) -> bool {
         matches!(self, Empty)
     }
     /// Anything gravity/buoyancy can displace by swapping cells.
     pub fn is_fluid(self) -> bool {
-        matches!(self, Water | Oil | Acid | Lava | Sand | Steam | Ash | Ember | Smoke)
+        matches!(
+            self,
+            Water
+                | Oil
+                | Acid
+                | Lava
+                | Mercury
+                | Sand
+                | Steam
+                | Ash
+                | Ember
+                | Smoke
+                | Salt
+                | Gunpowder
+        )
     }
     pub fn flammable(self) -> bool {
-        matches!(self, Wood | Oil)
+        matches!(self, Wood | Oil | Plant)
+    }
+
+    /// Stable on-disk encoding. Keep this independent from `ALL`, which is UI order.
+    pub fn to_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Reconstruct a material from its stable on-disk encoding.
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(Empty),
+            1 => Some(Stone),
+            2 => Some(Wood),
+            3 => Some(Sand),
+            4 => Some(Water),
+            5 => Some(Oil),
+            6 => Some(Acid),
+            7 => Some(Lava),
+            8 => Some(Fire),
+            9 => Some(Steam),
+            10 => Some(Ember),
+            11 => Some(Ash),
+            12 => Some(Smoke),
+            13 => Some(Salt),
+            14 => Some(Ice),
+            15 => Some(Gunpowder),
+            16 => Some(Plant),
+            17 => Some(Mercury),
+            _ => None,
+        }
     }
 
     /// Per-cell colour. `seed` rides along with a grain for stable texture;
@@ -117,7 +166,7 @@ impl Material {
 
         match self {
             Empty => Color::Rgb(8, 10, 16),
-            Wall => Color::Rgb(rs(95, 30), rs(95, 30), rs(105, 30)),
+            Stone => Color::Rgb(rs(95, 30), rs(95, 30), rs(105, 30)),
             Wood => Color::Rgb(rs(108, 26), rs(66, 18), rs(34, 12)),
             Sand => Color::Rgb(rs(206, 40), rs(184, 40), rs(96, 26)),
             Water => Color::Rgb(rs(38, 18), rs(104, 30), rs(226, 24)),
@@ -144,6 +193,11 @@ impl Material {
                 let g = 28 + (life / 4).min(70) as u8;
                 Color::Rgb(g, g, g.wrapping_add(6))
             }
+            Salt => Color::Rgb(rs(235, 12), rs(230, 12), rs(220, 12)),
+            Ice => Color::Rgb(rs(198, 16), rs(220, 14), rs(248, 12)),
+            Gunpowder => Color::Rgb(rs(42, 12), rs(40, 12), rs(38, 12)),
+            Plant => Color::Rgb(rs(30, 18), rs(148, 30), rs(30, 18)),
+            Mercury => Color::Rgb(rs(168, 18), rs(172, 18), rs(180, 18)),
         }
     }
 }
