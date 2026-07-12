@@ -55,7 +55,7 @@ fn draw_grid(frame: &mut Frame, world: &World, app: &App, area: &Rect) {
             }
             let ghost_top = app.paste_ghost_at(wx, top_y, world.width, world.height);
             let top_color = ghost_top
-                .map(|(material, life, seed)| material.color(seed, life, tick))
+                .map(|(material, life, seed, _)| material.color(seed, life, tick))
                 .unwrap_or_else(|| {
                     let top = world.get(wx as usize, top_y as usize);
                     top.color(
@@ -67,7 +67,7 @@ fn draw_grid(frame: &mut Frame, world: &World, app: &App, area: &Rect) {
             if let Some(bottom_y) = bottom_y {
                 let ghost_bottom = app.paste_ghost_at(wx, bottom_y, world.width, world.height);
                 let bottom_color = ghost_bottom
-                    .map(|(material, life, seed)| material.color(seed, life, tick))
+                    .map(|(material, life, seed, _)| material.color(seed, life, tick))
                     .unwrap_or_else(|| {
                         let bottom = world.get(wx as usize, bottom_y as usize);
                         bottom.color(

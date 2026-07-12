@@ -1,6 +1,6 @@
 use rand::Rng;
 
-use crate::material::Material;
+use crate::material::{AMBIENT_TEMP, Material};
 use crate::scene_manager::SceneState;
 use Material::*;
 
@@ -48,9 +48,6 @@ const C4_BLAST_RADIUS: i32 = 12;
 /// neighbours. Sets the burn-front pace: one cell advances per this many ticks.
 pub(crate) const FUSE_BURN_TICKS: u16 = 3;
 
-const FIRE_TEMPERATURE: u16 = 900;
-const EMBER_TEMPERATURE: u16 = 700;
-const LAVA_TEMPERATURE: u16 = 1_300;
 const CHUNK_W: usize = 64;
 const CHUNK_H: usize = 32;
 
@@ -123,6 +120,10 @@ pub struct World {
     grid: Vec<Material>,
     life: Vec<u16>,
     seed: Vec<u8>,
+    /// Approximate Celsius temperature per cell.
+    temp: Vec<i16>,
+    /// Scratch buffer for heat diffusion.
+    temp_next: Vec<i16>,
     moved_tick: Vec<u64>,
     active_chunks: Vec<bool>,
     next_active_chunks: Vec<bool>,
@@ -143,6 +144,8 @@ impl World {
             grid: vec![Empty; n],
             life: vec![0; n],
             seed: vec![0; n],
+            temp: vec![AMBIENT_TEMP; n],
+            temp_next: vec![AMBIENT_TEMP; n],
             moved_tick: vec![u64::MAX; n],
             active_chunks: vec![false; chunks_len(width, height)],
             next_active_chunks: vec![false; chunks_len(width, height)],
@@ -171,6 +174,9 @@ impl World {
     pub fn life_at(&self, x: usize, y: usize) -> u16 {
         self.life[self.idx(x, y)]
     }
+    pub fn temp_at(&self, x: usize, y: usize) -> i16 {
+        self.temp[self.idx(x, y)]
+    }
 
     /// Paint a single cell (used by the brush; does not touch movement bookkeeping).
     pub fn paint(&mut self, x: usize, y: usize, m: Material) {
@@ -181,18 +187,19 @@ impl World {
         self.grid[i] = m;
         self.seed[i] = rand::random();
         self.life[i] = rand_life(m);
+        self.temp[i] = m.painted_temperature();
         self.activate_now(x, y);
     }
-    /// Return a cell including its visual and lifetime state for editor copy/paste.
-    pub fn cell_state(&self, x: usize, y: usize) -> Option<(Material, u16, u8)> {
+    /// Return a cell including its visual, lifetime, and temperature state for editor copy/paste.
+    pub fn cell_state(&self, x: usize, y: usize) -> Option<(Material, u16, u8, i16)> {
         (x < self.width && y < self.height).then(|| {
             let i = self.idx(x, y);
-            (self.grid[i], self.life[i], self.seed[i])
+            (self.grid[i], self.life[i], self.seed[i], self.temp[i])
         })
     }
 
     /// Restore a cell copied by the editor without regenerating its state.
-    pub fn paint_state(&mut self, x: usize, y: usize, state: (Material, u16, u8)) {
+    pub fn paint_state(&mut self, x: usize, y: usize, state: (Material, u16, u8, i16)) {
         if x >= self.width || y >= self.height {
             return;
         }
@@ -200,6 +207,7 @@ impl World {
         self.grid[i] = state.0;
         self.life[i] = state.1;
         self.seed[i] = state.2;
+        self.temp[i] = state.3;
         self.activate_now(x, y);
     }
 
@@ -208,6 +216,7 @@ impl World {
             self.grid[i] = Empty;
             self.life[i] = 0;
             self.seed[i] = rand::random();
+            self.temp[i] = AMBIENT_TEMP;
         }
         self.tick = 0;
         self.moved_tick.fill(u64::MAX);
@@ -229,6 +238,11 @@ impl World {
     /// Expose seed values for serialization.
     pub fn seed(&self) -> &[u8] {
         &self.seed
+    }
+
+    /// Expose temperatures for serialization.
+    pub fn temp(&self) -> &[i16] {
+        &self.temp
     }
 
     pub fn load_scene(&mut self, scene: Scene) {
@@ -258,6 +272,11 @@ impl World {
                     .unwrap_or(Empty);
                 self.life[dst] = state.life.get(src).copied().unwrap_or(0);
                 self.seed[dst] = state.seed.get(src).copied().unwrap_or(0);
+                self.temp[dst] = state
+                    .temp
+                    .get(src)
+                    .copied()
+                    .unwrap_or_else(|| self.grid[dst].painted_temperature());
             }
         }
         self.tick = 0;
@@ -270,6 +289,7 @@ impl World {
         let mut grid = vec![Empty; width * height];
         let mut life = vec![0; width * height];
         let mut seed = vec![0; width * height];
+        let mut temp = vec![AMBIENT_TEMP; width * height];
         let cw = width.min(self.width);
         let ch = height.min(self.height);
         for y in 0..ch {
@@ -277,6 +297,7 @@ impl World {
                 grid[y * width + x] = self.grid[y * self.width + x];
                 life[y * width + x] = self.life[y * self.width + x];
                 seed[y * width + x] = self.seed[y * self.width + x];
+                temp[y * width + x] = self.temp[y * self.width + x];
             }
         }
         self.width = width;
@@ -284,6 +305,8 @@ impl World {
         self.grid = grid;
         self.life = life;
         self.seed = seed;
+        self.temp = temp;
+        self.temp_next = vec![AMBIENT_TEMP; width * height];
         self.moved_tick = vec![u64::MAX; width * height];
         self.chunks_x = chunks_x(width);
         self.chunks_y = chunks_y(height);
@@ -326,6 +349,7 @@ impl World {
         self.grid[i] = m;
         self.life[i] = life;
         self.seed[i] = rand::random();
+        self.temp[i] = m.painted_temperature();
         self.moved_tick[i] = self.tick;
         self.activate_idx(i);
     }
@@ -334,6 +358,7 @@ impl World {
         self.grid.swap(a, b);
         self.life.swap(a, b);
         self.seed.swap(a, b);
+        self.temp.swap(a, b);
         self.moved_tick[a] = self.tick;
         self.moved_tick[b] = self.tick;
         self.activate_idx(a);
@@ -547,33 +572,36 @@ impl World {
             let (tx, ty) = self.adj(x, y, dx, dy).expect("prechecked wood translation");
             let ti = self.idx(tx, ty);
             target_set[ti] = true;
-            moves.push((i, ti, self.life[i], self.seed[i]));
+            moves.push((i, ti, self.life[i], self.seed[i], self.temp[i]));
             if !in_component[ti] && self.grid[ti] != Empty {
-                displaced.push((self.grid[ti], self.life[ti], self.seed[ti]));
+                displaced.push((self.grid[ti], self.life[ti], self.seed[ti], self.temp[ti]));
             }
         }
 
-        for &(i, _, _, _) in &moves {
+        for &(i, _, _, _, _) in &moves {
             self.grid[i] = Empty;
             self.life[i] = 0;
+            self.temp[i] = AMBIENT_TEMP;
             self.moved_tick[i] = self.tick;
             self.activate_idx(i);
         }
-        for &(_, ti, life, seed) in &moves {
+        for &(_, ti, life, seed, temp) in &moves {
             self.grid[ti] = Wood;
             self.life[ti] = life;
             self.seed[ti] = seed;
+            self.temp[ti] = temp;
             self.moved_tick[ti] = self.tick;
             self.activate_idx(ti);
         }
-        for &(i, _, _, _) in &moves {
+        for &(i, _, _, _, _) in &moves {
             if target_set[i] {
                 continue;
             }
-            if let Some((m, life, seed)) = displaced.pop() {
+            if let Some((m, life, seed, temp)) = displaced.pop() {
                 self.grid[i] = m;
                 self.life[i] = life;
                 self.seed[i] = seed;
+                self.temp[i] = temp;
             }
         }
     }
@@ -660,6 +688,7 @@ impl World {
 
     pub fn step(&mut self) {
         self.next_active_chunks.fill(false);
+        self.step_heat();
         self.step_wood_components();
 
         for chunk_y in (0..self.chunks_y).rev() {
@@ -692,6 +721,19 @@ impl World {
                         if material.flammable() {
                             self.activate_next(x, y);
                             if self.step_combustible(x, y) {
+                                continue;
+                            }
+                        } else if material != Ice
+                            && material
+                                .melt()
+                                .is_some_and(|(melt_temp, _, _)| {
+                                    self.effective_temp(x, y).max(0) as u16 >= melt_temp / 2
+                                })
+                        {
+                            // Only track heat-soak when the cell is already warm enough
+                            // that melting is plausible (avoids keeping cold sand active).
+                            self.activate_next(x, y);
+                            if self.step_melt(x, y) {
                                 continue;
                             }
                         }
@@ -728,6 +770,14 @@ impl World {
                             Fuse => self.step_fuse(x, y),
                             Tnt => self.step_tnt(x, y),
                             C4 => self.step_c4(x, y),
+                            Faucet => {
+                                self.activate_next(x, y);
+                                self.step_faucet(x, y);
+                            }
+                            Drain => {
+                                self.activate_next(x, y);
+                                self.step_drain(x, y);
+                            }
                         }
                     }
                 }
@@ -735,6 +785,68 @@ impl World {
         }
         std::mem::swap(&mut self.active_chunks, &mut self.next_active_chunks);
         self.tick = self.tick.wrapping_add(1);
+    }
+
+    /// Diffuse heat through active chunks. Sources clamp; other cells equalize
+    /// with neighbours and slowly return toward ambient.
+    fn step_heat(&mut self) {
+        self.temp_next.copy_from_slice(&self.temp);
+        for chunk_y in 0..self.chunks_y {
+            for chunk_x in 0..self.chunks_x {
+                let chunk_i = chunk_y * self.chunks_x + chunk_x;
+                if !self.active_chunks.get(chunk_i).copied().unwrap_or(false) {
+                    continue;
+                }
+                let y0 = chunk_y * CHUNK_H;
+                let y1 = ((chunk_y + 1) * CHUNK_H).min(self.height);
+                let x0 = chunk_x * CHUNK_W;
+                let x1 = ((chunk_x + 1) * CHUNK_W).min(self.width);
+                for y in y0..y1 {
+                    for x in x0..x1 {
+                        let i = self.idx(x, y);
+                        let m = self.grid[i];
+                        if let Some(src) = m.heat_source_temp() {
+                            self.temp_next[i] = src;
+                            self.activate_next(x, y);
+                            continue;
+                        }
+                        let mut sum = self.temp[i] as i32;
+                        let mut n = 1i32;
+                        for neigh in self.n4(x, y).into_iter().flatten() {
+                            sum += self.temp[self.idx(neigh.0, neigh.1)] as i32;
+                            n += 1;
+                        }
+                        let avg = sum / n;
+                        let cond = m.thermal_conductivity() as i32;
+                        let cur = self.temp[i] as i32;
+                        let mut next = cur + (avg - cur) * cond / 16;
+                        next += (AMBIENT_TEMP as i32 - next) / 48;
+                        self.temp_next[i] = next.clamp(-200, 1_500) as i16;
+                        if (self.temp_next[i] - AMBIENT_TEMP).abs() > 5 {
+                            self.activate_next(x, y);
+                        }
+                    }
+                }
+            }
+        }
+        std::mem::swap(&mut self.temp, &mut self.temp_next);
+    }
+
+    /// Peak temperature felt by a cell: stored heat plus direct contact with
+    /// hot/cold sources (so ignition still works before heat soaks through).
+    fn effective_temp(&self, x: usize, y: usize) -> i16 {
+        let i = self.idx(x, y);
+        let mut t = self.temp[i];
+        for n in self.n8(x, y).into_iter().flatten() {
+            if let Some(src) = self.grid[self.idx(n.0, n.1)].heat_source_temp() {
+                if src > t {
+                    t = src;
+                } else if src < t {
+                    t = t.min(src + (t - src) / 2);
+                }
+            }
+        }
+        t
     }
 
     fn explode(&mut self, x: usize, y: usize, radius: i32) {
@@ -749,11 +861,11 @@ impl World {
                 };
                 let i = self.idx(tx, ty);
                 let material = self.grid[i];
-                if matches!(material, Metal | Concrete) {
+                if material.blast_resistant() {
                     continue;
                 }
-                if material == Glass {
-                    self.put(i, Sand, 0);
+                if let Some(shard) = material.blast_shatter_product() {
+                    self.put(i, shard, 0);
                     continue;
                 }
                 let roll = self.roll(tx, ty, 0x92);
@@ -774,20 +886,9 @@ impl World {
         let Some((ignition_temperature, ignition_delay, burn_life)) = material.combustion() else {
             return false;
         };
-        let source_temperature = self
-            .n8(x, y)
-            .into_iter()
-            .flatten()
-            .map(|(nx, ny)| match self.grid[self.idx(nx, ny)] {
-                Lava => LAVA_TEMPERATURE,
-                Fire => FIRE_TEMPERATURE,
-                Ember => EMBER_TEMPERATURE,
-                _ => 0,
-            })
-            .max()
-            .unwrap_or(0);
+        let heat = self.effective_temp(x, y).max(0) as u16;
 
-        if source_temperature < ignition_temperature {
+        if heat < ignition_temperature {
             self.life[i] = 0;
             return false;
         }
@@ -797,12 +898,32 @@ impl World {
             return false;
         }
 
-        let burning = if matches!(material, Wood | Plant | Coal) {
-            Ember
-        } else {
-            Fire
+        self.put(i, material.burn_product(), burn_life);
+        true
+    }
+
+    /// Soak heat into structural materials until they crack/melt into a product.
+    fn step_melt(&mut self, x: usize, y: usize) -> bool {
+        let i = self.idx(x, y);
+        let material = self.grid[i];
+        // Ice melting is handled in step_ice (contact + temperature).
+        if material == Ice {
+            return false;
+        }
+        let Some((melt_temp, delay, product)) = material.melt() else {
+            return false;
         };
-        self.put(i, burning, burn_life);
+        let heat = self.effective_temp(x, y).max(0) as u16;
+        if heat < melt_temp {
+            self.life[i] = 0;
+            return false;
+        }
+        self.life[i] = self.life[i].saturating_add(1);
+        if self.life[i] < delay {
+            return false;
+        }
+        let life = rand_life(product);
+        self.put(i, product, life);
         true
     }
 
@@ -852,10 +973,12 @@ impl World {
     }
 
     fn is_heated(&self, x: usize, y: usize) -> bool {
-        self.n8(x, y)
-            .into_iter()
-            .flatten()
-            .any(|(nx, ny)| matches!(self.grid[self.idx(nx, ny)], Fire | Lava | Ember))
+        self.effective_temp(x, y) >= 600
+            || self
+                .n8(x, y)
+                .into_iter()
+                .flatten()
+                .any(|(nx, ny)| matches!(self.grid[self.idx(nx, ny)], Fire | Lava | Ember))
     }
 
     fn step_c4(&mut self, x: usize, y: usize) {
@@ -867,24 +990,13 @@ impl World {
 
     fn step_powder(&mut self, x: usize, y: usize) {
         let i = self.idx(x, y);
+
+        if self.react_cell(x, y) {
+            return;
+        }
         let m = self.grid[i];
 
-        // Salt dissolves in Water
-        if m == Salt {
-            for n in self.n4(x, y) {
-                let Some((nx, ny)) = n else { continue };
-                let ni = self.idx(nx, ny);
-                if self.grid[ni] == Water && self.chance(nx, ny, 0x90, 80) {
-                    self.put(ni, Water, 0);
-                    if self.chance(nx, ny, 0x91, 400) {
-                        self.put(i, Empty, 0);
-                        return;
-                    }
-                }
-            }
-        }
-
-        // Gunpowder destroys every material in its blast radius when heated.
+        // Gunpowder blast respects blast_resistant materials via explode().
         if m == Gunpowder && self.is_heated(x, y) {
             self.explode(x, y, GUNPOWDER_BLAST_RADIUS);
             return;
@@ -910,27 +1022,27 @@ impl World {
 
     fn step_liquid(&mut self, x: usize, y: usize) {
         let i = self.idx(x, y);
-        let m = self.grid[i];
 
         // reactions first (may consume this cell)
-        let consumed = match m {
-            Lava => self.react_lava(x, y),
-            Acid => self.react_acid(x, y),
-            Water => self.react_water(x, y),
-            LiquidNitrogen => self.react_liquid_nitrogen(x, y),
-            _ => false,
-        };
-        if consumed {
+        if self.react_cell(x, y) {
             return;
         }
-        let m = self.grid[self.idx(x, y)];
+        let m = self.grid[i];
         if !m.is_liquid() {
             return;
         }
 
-        // Lava and napalm are viscous.
+        // Lava and napalm are viscous; napalm also clings to solids.
         if matches!(m, Lava | Napalm) && !self.tick.is_multiple_of(2) {
             return;
+        }
+        if m.sticky() {
+            if let Some((bx, by)) = self.adj(x, y, 0, 1) {
+                let below = self.grid[self.idx(bx, by)];
+                if !below.is_empty() && !below.is_fluid() && !self.chance(x, y, 0x55, 80) {
+                    return;
+                }
+            }
         }
 
         let sink = |other| m.can_sink_into(other);
@@ -953,6 +1065,10 @@ impl World {
         }
         // buoyancy: lighter liquid rises through a denser one
         if self.try_step(x, y, 0, -1, rise) {
+            return;
+        }
+        // sticky gels barely flow sideways
+        if m.sticky() && !self.chance(x, y, 0x56, 120) {
             return;
         }
         // horizontal flow: travel several cells so a liquid levels out quickly
@@ -1003,11 +1119,38 @@ impl World {
         let i = self.idx(x, y);
         let m = self.grid[i];
         let life = self.life[i].saturating_sub(1);
+        let on_cold_surface = |world: &World, x: usize, y: usize| {
+            world.n4(x, y).into_iter().flatten().any(|(nx, ny)| {
+                matches!(
+                    world.grid[world.idx(nx, ny)],
+                    Ice | LiquidNitrogen | Metal | Glass
+                ) || (world.grid[world.idx(nx, ny)] == Water
+                    && world.temp[world.idx(nx, ny)] < 40)
+            })
+        };
         if life == 0 {
-            self.put(i, Empty, 0);
+            // Spent steam rains out when cool or when touching a cold surface.
+            if m == Steam && (self.temp[i] < 100 || on_cold_surface(self, x, y)) {
+                self.put(i, Water, 0);
+            } else {
+                self.put(i, Empty, 0);
+            }
             return;
         }
         self.life[i] = life;
+
+        // Steam condenses on cold surfaces; contact is a strong cue even while
+        // the gas is still modelled as a warm source cell.
+        if m == Steam {
+            if on_cold_surface(self, x, y) && (life < 80 || self.chance(x, y, 0x33, 250)) {
+                self.put(i, Water, 0);
+                return;
+            }
+            if self.temp[i] < 80 && (life < 40 || self.chance(x, y, 0x34, 100)) {
+                self.put(i, Water, 0);
+                return;
+            }
+        }
 
         let d = m.density();
         let rise = |t: Material| t.is_empty() || (t.is_fluid() && d < t.density());
@@ -1043,6 +1186,13 @@ impl World {
         }
         self.life[i] = life;
 
+        // Oil/napalm fires shrug off water: water boils away, flame keeps burning.
+        let oily = self
+            .n8(x, y)
+            .into_iter()
+            .flatten()
+            .any(|(nx, ny)| self.grid[self.idx(nx, ny)].is_oily());
+
         let mut extinguished = false;
         for n in self.n8(x, y) {
             let Some((nx, ny)) = n else {
@@ -1051,8 +1201,12 @@ impl World {
             let ni = self.idx(nx, ny);
             let other = self.grid[ni];
             if other == Water {
-                // water quenches fire: both turn to steam
                 self.put(ni, Steam, rand_range(STEAM_LIFE_MIN, STEAM_LIFE_MAX));
+                if !oily {
+                    extinguished = true;
+                }
+                // greasy fires: water steams off without killing the flame
+            } else if other == LiquidNitrogen {
                 extinguished = true;
             }
         }
@@ -1157,6 +1311,22 @@ impl World {
         }
     }
 
+    /// Central material chemistry. Returns true when the cell at `(x, y)` was
+    /// consumed or replaced and should stop further stepping this tick.
+    fn react_cell(&mut self, x: usize, y: usize) -> bool {
+        let i = self.idx(x, y);
+        let m = self.grid[i];
+        match m {
+            Lava => self.react_lava(x, y),
+            Acid => self.react_acid(x, y),
+            Water => self.react_water(x, y),
+            LiquidNitrogen => self.react_liquid_nitrogen(x, y),
+            Salt => self.react_salt(x, y),
+            Mercury => self.react_mercury(x, y),
+            _ => false,
+        }
+    }
+
     fn react_liquid_nitrogen(&mut self, x: usize, y: usize) -> bool {
         let i = self.idx(x, y);
         for n in self.n4(x, y).into_iter().flatten() {
@@ -1181,9 +1351,17 @@ impl World {
                 continue;
             };
             let ni = self.idx(nx, ny);
-            if self.grid[ni] == Water {
-                self.put(ni, Steam, rand_range(STEAM_LIFE_MIN, STEAM_LIFE_MAX));
-                solidified = true;
+            match self.grid[ni] {
+                Water => {
+                    self.put(ni, Steam, rand_range(STEAM_LIFE_MIN, STEAM_LIFE_MAX));
+                    solidified = true;
+                }
+                // Sand already softened by heat can be absorbed into the flow.
+                // Stone/concrete use the slower heat-soak melt path instead.
+                Sand if self.chance(nx, ny, 0x72, 40) => {
+                    self.put(ni, Lava, 0);
+                }
+                _ => {}
             }
         }
         if solidified {
@@ -1200,10 +1378,13 @@ impl World {
             };
             let ni = self.idx(nx, ny);
             let other = self.grid[ni];
-            if other.is_empty() || matches!(other, Acid | Stone | Concrete | Metal | Glass) {
+            let resist = other.acid_resistance();
+            if resist >= 1000 {
                 continue;
             }
-            if self.chance(nx, ny, 0x70, 200) {
+            // base etch chance reduced by resistance
+            let etch = 200u32.saturating_sub(resist / 5);
+            if etch > 0 && self.chance(nx, ny, 0x70, etch) {
                 self.put(ni, Empty, 0);
                 if self.chance(nx, ny, 0x71, 350) {
                     consumed = true;
@@ -1216,23 +1397,47 @@ impl World {
         consumed
     }
 
-    /// Water next to fire has a chance to flash into steam (symmetric to fire's logic).
-    fn step_plant(&mut self, x: usize, y: usize) {
+    /// Salt dissolves into water (salt removed only) and brines ice into water.
+    fn react_salt(&mut self, x: usize, y: usize) -> bool {
         let i = self.idx(x, y);
-
-        // Acid dissolves Plant
-        for n in self.n4(x, y) {
-            let Some((nx, ny)) = n else { continue };
-            let ni = self.idx(nx, ny);
-            if self.grid[ni] == Acid && self.chance(nx, ny, 0xA0, 200) {
-                self.put(ni, Empty, 0);
-                if self.chance(x, y, 0xA1, 350) {
-                    self.put(i, Empty, 0);
-                    return;
+        for n in self.n4(x, y).into_iter().flatten() {
+            let ni = self.idx(n.0, n.1);
+            match self.grid[ni] {
+                Water if self.chance(n.0, n.1, 0x90, 80) => {
+                    // dissolve: remove salt, leave the water cell untouched
+                    if self.chance(n.0, n.1, 0x91, 400) {
+                        self.put(i, Empty, 0);
+                        return true;
+                    }
                 }
+                Ice if self.chance(n.0, n.1, 0x93, 120) => {
+                    // brine lowers freeze point: ice thaws
+                    self.put(ni, Water, 0);
+                    if self.chance(n.0, n.1, 0x94, 200) {
+                        self.put(i, Empty, 0);
+                        return true;
+                    }
+                }
+                _ => {}
             }
         }
+        false
+    }
 
+    /// Mercury slowly amalgamates (eats) adjacent metal.
+    fn react_mercury(&mut self, x: usize, y: usize) -> bool {
+        for n in self.n4(x, y).into_iter().flatten() {
+            let ni = self.idx(n.0, n.1);
+            if self.grid[ni] == Metal && self.chance(n.0, n.1, 0x95, 15) {
+                self.put(ni, Empty, 0);
+                return false;
+            }
+        }
+        false
+    }
+
+    fn step_plant(&mut self, x: usize, y: usize) {
+        // Acid is handled by react_acid when the acid cell steps; plants only grow here.
         // Plant grows when adjacent to Water
         for n in self.n4(x, y) {
             let Some((nx, ny)) = n else { continue };
@@ -1255,49 +1460,98 @@ impl World {
     fn step_ice(&mut self, x: usize, y: usize) {
         let i = self.idx(x, y);
 
-        // Ice melts near Fire / Lava / Ember
-        for n in self.n8(x, y) {
-            let Some((nx, ny)) = n else { continue };
-            let ni = self.idx(nx, ny);
-            match self.grid[ni] {
-                Fire | Lava | Ember if self.chance(nx, ny, 0xB0, 200) => {
-                    self.put(i, Water, 0);
-                    return;
-                }
-                _ => {}
+        // Temperature-driven melt (contact heat soaks into temp / effective_temp).
+        let heat = self.effective_temp(x, y);
+        if heat > 0 {
+            let chance = ((heat as u32).min(400) / 2).max(50);
+            if self.chance(x, y, 0xB0, chance) {
+                self.put(i, Water, 0);
+                return;
             }
         }
 
-        // Acid shatters Ice
-        for n in self.n4(x, y) {
-            let Some((nx, ny)) = n else { continue };
-            let ni = self.idx(nx, ny);
-            if self.grid[ni] == Acid && self.chance(nx, ny, 0xB1, 200) {
-                self.put(ni, Empty, 0);
-                if self.chance(x, y, 0xB2, 350) {
-                    self.put(i, Empty, 0);
-                    return;
-                }
-            }
-        }
+        // Salt brine is handled when salt steps; acid etching when acid steps.
     }
 
     fn react_water(&mut self, x: usize, y: usize) -> bool {
+        let i = self.idx(x, y);
+        // freeze when very cold (LN2 diffusion / contact)
+        if self.effective_temp(x, y) < 0 && self.chance(x, y, 0x81, 200) {
+            self.put(i, Ice, 0);
+            return true;
+        }
         for n in self.n4(x, y) {
             let Some((nx, ny)) = n else {
                 continue;
             };
             let ni = self.idx(nx, ny);
-            if self.grid[ni] == Fire && self.chance(nx, ny, 0x80, 300) {
-                self.put(
-                    self.idx(x, y),
-                    Steam,
-                    rand_range(STEAM_LIFE_MIN, STEAM_LIFE_MAX),
-                );
-                return true;
+            match self.grid[ni] {
+                Fire if self.chance(nx, ny, 0x80, 300) => {
+                    // do not flash-boil next to oil fires as readily
+                    let oily = self
+                        .n8(nx, ny)
+                        .into_iter()
+                        .flatten()
+                        .any(|(ox, oy)| self.grid[self.idx(ox, oy)].is_oily());
+                    if oily && !self.chance(nx, ny, 0x82, 100) {
+                        continue;
+                    }
+                    self.put(i, Steam, rand_range(STEAM_LIFE_MIN, STEAM_LIFE_MAX));
+                    return true;
+                }
+                Lava => {
+                    // water side of lava+water: boil; lava solidifies when it steps
+                    self.put(i, Steam, rand_range(STEAM_LIFE_MIN, STEAM_LIFE_MAX));
+                    return true;
+                }
+                _ => {}
             }
         }
         false
+    }
+
+    /// Emit a continuous column of water beneath the faucet. The cell stays
+    /// active every tick so the stream does not die when the world settles.
+    fn step_faucet(&mut self, x: usize, y: usize) {
+        let Some((tx, ty)) = self.adj(x, y, 0, 1) else {
+            return;
+        };
+        let ti = self.idx(tx, ty);
+        match self.grid[ti] {
+            Empty => {
+                self.put(ti, Water, 0);
+            }
+            // Keep pressure on an existing stream so gaps refill every tick.
+            Water => {
+                self.activate_next(tx, ty);
+                // If the water immediately below has room further down, nudge it
+                // so the faucet outlet does not stall as a single hanging drop.
+                if let Some((bx, by)) = self.adj(tx, ty, 0, 1) {
+                    let bi = self.idx(bx, by);
+                    if self.grid[bi].is_empty() {
+                        self.swap(ti, bi);
+                        self.put(ti, Water, 0);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn step_drain(&mut self, x: usize, y: usize) {
+        for n in self.n8(x, y) {
+            if let Some((nx, ny)) = n {
+                let ni = self.idx(nx, ny);
+                let m = self.grid[ni];
+                if m.is_empty() || m == Drain {
+                    continue;
+                }
+                if m.is_fluid() || m.is_gas() {
+                    self.put(ni, Empty, 0);
+                    return;
+                }
+            }
+        }
     }
 }
 

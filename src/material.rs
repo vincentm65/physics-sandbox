@@ -31,10 +31,14 @@ pub enum Material {
     Glass,
     Metal,
     LiquidNitrogen,
+    Faucet,
+    Drain,
     Concrete,
 }
-
 use Material::*;
+
+/// Approximate ambient air temperature in Celsius.
+pub const AMBIENT_TEMP: i16 = 20;
 
 impl Material {
     /// `[key, material]` pairs for the on-screen palette.
@@ -52,7 +56,7 @@ impl Material {
     ];
 
     /// Every material, grouped by phase, in the order the picker lists them.
-    pub const ALL: [Material; 27] = [
+    pub const ALL: [Material; 29] = [
         // powders / granular
         Sand,
         Ash,
@@ -83,6 +87,9 @@ impl Material {
         Ember,
         Steam,
         Smoke,
+        // tools
+        Faucet,
+        Drain,
         Empty,
     ];
 
@@ -115,6 +122,8 @@ impl Material {
             Metal => "Metal",
             LiquidNitrogen => "Liquid nitrogen",
             Concrete => "Concrete",
+            Faucet => "Faucet",
+            Drain => "Drain",
         }
     }
 
@@ -142,6 +151,8 @@ impl Material {
             Glass => 7,
             Concrete => 10,
             Metal => 14,
+            Faucet => 0,
+            Drain => 0,
             _ => 0,
         }
     }
@@ -168,14 +179,18 @@ impl Material {
         other.is_empty() || (other.is_fluid() && self.density() > other.density())
     }
 
-    /// Combustible materials, including heat-resistant structural materials.
+    /// Oils and gels that float and resist ordinary water extinguishing.
+    pub fn is_oily(self) -> bool {
+        matches!(self, Oil | Napalm)
+    }
+
+    /// Combustible fuels that ignite into fire/ember. Structural solids use
+    /// [`melt`] instead of burning.
     pub fn flammable(self) -> bool {
         self.combustion().is_some()
     }
 
-    /// `(minimum source temperature, ignition delay, burn lifetime)`.
-    /// Temperatures are approximate Celsius values used to distinguish ordinary
-    /// flame from hotter lava; delays and lifetimes are simulation ticks.
+    /// `(minimum temperature °C, ignition delay ticks, burn lifetime)`.
     pub fn combustion(self) -> Option<(u16, u16, u16)> {
         match self {
             Plant => Some((230, 24, 100)),
@@ -183,11 +198,95 @@ impl Material {
             Wood => Some((300, 48, 160)),
             Oil => Some((350, 24, 120)),
             Coal => Some((500, 64, 550)),
-            Glass => Some((1_100, 90, 700)),
-            Stone => Some((1_200, 150, 1_000)),
-            Concrete => Some((1_250, 180, 1_200)),
             _ => None,
         }
+    }
+
+    /// Product left when a fuel finishes its ignition transition.
+    pub fn burn_product(self) -> Material {
+        match self {
+            Wood | Plant | Coal => Ember,
+            _ => Fire,
+        }
+    }
+
+    /// Heat-driven phase change: `(melt temperature °C, soak delay, product)`.
+    /// Structural materials crack or melt instead of becoming flame.
+    pub fn melt(self) -> Option<(u16, u16, Material)> {
+        match self {
+            Ice => Some((1, 4, Water)),
+            Glass => Some((1_100, 90, Sand)),
+            Stone => Some((1_200, 150, Sand)),
+            Concrete => Some((1_250, 180, Sand)),
+            Metal => Some((1_250, 220, Lava)),
+            Sand => Some((1_280, 200, Lava)),
+            _ => None,
+        }
+    }
+
+    /// Fixed temperature this material forces when present (heat/cold source).
+    /// `None` means the cell free-floats thermally.
+    pub fn heat_source_temp(self) -> Option<i16> {
+        match self {
+            Lava => Some(1_300),
+            Fire => Some(900),
+            Ember => Some(700),
+            Steam => Some(105),
+            Smoke => Some(60),
+            LiquidNitrogen => Some(-196),
+            Ice => Some(-5),
+            _ => None,
+        }
+    }
+
+    /// Temperature assigned when the material is painted into the world.
+    pub fn painted_temperature(self) -> i16 {
+        self.heat_source_temp().unwrap_or(AMBIENT_TEMP)
+    }
+
+    /// How quickly this material equalizes with neighbors (0 = insulator, 8 = metal).
+    pub fn thermal_conductivity(self) -> i16 {
+        match self {
+            Metal => 8,
+            Empty | Fire | Steam | Smoke => 6,
+            Water | Acid | Lava | LiquidNitrogen | Mercury | Oil | Napalm => 5,
+            Glass | Ice | Sand | Salt | Ash => 4,
+            Ember | Gunpowder | Coal => 3,
+            Wood | Plant | Fuse | Tnt | C4 | Stone | Concrete => 2,
+            Faucet | Drain => 3,
+        }
+    }
+
+    /// Per-mille chance acid fails to etch this material (1000 = immune).
+    pub fn acid_resistance(self) -> u32 {
+        match self {
+            Empty | Acid => 1000,
+            Stone | Concrete | Glass => 1000,
+            Metal => 920,
+            Sand | Ash | Salt | Coal | Gunpowder => 100,
+            Ice => 50,
+            Plant | Wood | Fuse => 0,
+            Oil | Napalm | Water | Mercury | Lava | LiquidNitrogen => 700,
+            Fire | Ember | Steam | Smoke | Tnt | C4 | Faucet | Drain => 1000,
+        }
+    }
+
+    /// Whether an explosion can destroy this cell.
+    pub fn blast_resistant(self) -> bool {
+        matches!(self, Metal | Concrete)
+    }
+
+    /// Blast hits on glass shatter into sand rather than fire/smoke.
+    pub fn blast_shatter_product(self) -> Option<Material> {
+        match self {
+            Glass => Some(Sand),
+            _ => None,
+        }
+    }
+
+    /// Napalm clings to solids instead of flowing freely.
+    pub fn sticky(self) -> bool {
+        matches!(self, Napalm)
     }
 
     /// Stable on-disk encoding. Keep this independent from `ALL`, which is UI order.
@@ -197,6 +296,7 @@ impl Material {
 
     /// Reconstruct a material from its stable on-disk encoding.
     pub fn from_u8(v: u8) -> Option<Self> {
+        // Discriminants follow the enum declaration order.
         match v {
             0 => Some(Empty),
             1 => Some(Stone),
@@ -224,7 +324,9 @@ impl Material {
             23 => Some(Glass),
             24 => Some(Metal),
             25 => Some(LiquidNitrogen),
-            26 => Some(Concrete),
+            26 => Some(Faucet),
+            27 => Some(Drain),
+            28 => Some(Concrete),
             _ => None,
         }
     }
@@ -286,7 +388,9 @@ impl Material {
             Glass => Color::Rgb(rs(145, 30), rs(205, 25), rs(220, 25)),
             Metal => Color::Rgb(rs(150, 35), rs(158, 35), rs(168, 35)),
             LiquidNitrogen => Color::Rgb(rs(180, 25), rs(225, 25), 250),
-            Concrete => Color::Rgb(rs(105, 22), rs(105, 22), rs(100, 22)),
+            Faucet => Color::Rgb(rs(140, 30), rs(148, 30), rs(155, 30)),
+            Drain => Color::Rgb(rs(48, 18), rs(52, 18), rs(58, 18)),
+            Concrete => Color::Rgb(rs(100, 20), rs(100, 20), rs(108, 20)),
         }
     }
 }

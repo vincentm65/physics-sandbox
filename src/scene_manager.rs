@@ -13,6 +13,9 @@ pub struct SceneState {
     pub grid: Vec<u8>,
     pub life: Vec<u16>,
     pub seed: Vec<u8>,
+    /// Optional for backward compatibility with older scene files.
+    #[serde(default)]
+    pub temp: Vec<i16>,
     pub saved_at: u64,
 }
 
@@ -22,6 +25,7 @@ impl SceneState {
         let grid: Vec<u8> = world.grid().iter().map(|m| m.to_u8()).collect();
         let life = world.life().to_vec();
         let seed = world.seed().to_vec();
+        let temp = world.temp().to_vec();
         Self {
             name,
             width: world.width,
@@ -29,6 +33,7 @@ impl SceneState {
             grid,
             life,
             seed,
+            temp,
             saved_at: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())

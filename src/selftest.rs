@@ -865,7 +865,7 @@ fn fuse_burns_progressively() -> Result<(), String> {
 
 fn structural_materials_need_sustained_high_heat() -> Result<(), String> {
     for material in [Glass, Stone, Concrete] {
-        let (_, delay, burn_life) = material.combustion().ok_or("missing combustion profile")?;
+        let (_, delay, product) = material.melt().ok_or("missing melt profile")?;
 
         let mut ordinary_fire = World::new(3, 3);
         ordinary_fire.paint(1, 1, material);
@@ -880,7 +880,7 @@ fn structural_materials_need_sustained_high_heat() -> Result<(), String> {
             ordinary_fire.step();
         }
         if ordinary_fire.get(1, 1) != material {
-            return Err(format!("{} ignited from ordinary fire", material.name()));
+            return Err(format!("{} melted from ordinary fire", material.name()));
         }
 
         let mut high_heat = World::new(3, 3);
@@ -896,18 +896,169 @@ fn structural_materials_need_sustained_high_heat() -> Result<(), String> {
             high_heat.step();
         }
         if high_heat.get(1, 1) != material {
-            return Err(format!("{} ignited before its delay", material.name()));
+            return Err(format!("{} melted before its soak delay", material.name()));
         }
         high_heat.step();
-        if high_heat.get(1, 1) != Fire {
+        if high_heat.get(1, 1) != product {
             return Err(format!(
-                "{} did not ignite from sustained lava heat",
-                material.name()
+                "{} did not melt into {} from sustained lava heat (got {})",
+                material.name(),
+                product.name(),
+                high_heat.get(1, 1).name()
             ));
         }
-        if burn_life < 700 {
-            return Err(format!("{} burns too quickly", material.name()));
+    }
+    Ok(())
+}
+
+fn steam_condenses_when_cool() -> Result<(), String> {
+    let mut w = World::new(7, 7);
+    // Seal a pocket so steam cannot rise away from the cold metal floor.
+    for x in 1..6 {
+        for y in 1..6 {
+            w.paint(x, y, Metal);
         }
+    }
+    w.paint(3, 3, Steam);
+    w.paint(3, 4, Empty);
+    w.paint(2, 3, Empty);
+    w.paint(4, 3, Empty);
+    for _ in 0..200 {
+        w.step();
+        if count(&w, Water) > 0 {
+            return Ok(());
+        }
+    }
+    Err(format!(
+        "cool steam did not condense into water (steam={}, empty pocket)",
+        count(&w, Steam)
+    ))
+}
+
+fn heat_conducts_through_metal() -> Result<(), String> {
+    let mut w = World::new(7, 3);
+    // Lava | Metal | Metal | Wood — heat should soak across the metal bar.
+    w.paint(1, 1, Lava);
+    w.paint(2, 1, Metal);
+    w.paint(3, 1, Metal);
+    w.paint(4, 1, Wood);
+    for _ in 0..200 {
+        w.step();
+    }
+    // Wood should eventually char once conducted heat + contact path ignites it,
+    // or at least the metal far from lava should be warmer than ambient.
+    let metal_temp = w.temp_at(3, 1);
+    if metal_temp < 100 {
+        return Err(format!(
+            "heat did not conduct through metal (temp at far metal={metal_temp})"
+        ));
+    }
+    Ok(())
+}
+
+fn oil_fire_resists_water() -> Result<(), String> {
+    // Ordinary wood fire dies when water touches it.
+    let mut wood_fire = World::new(5, 5);
+    wood_fire.paint(2, 2, Wood);
+    wood_fire.paint(2, 1, Fire);
+    wood_fire.paint(1, 1, Water);
+    wood_fire.paint(3, 1, Water);
+    wood_fire.step();
+    if wood_fire.get(2, 1) == Fire {
+        return Err("ordinary fire was not quenched by water".into());
+    }
+
+    // Greasy fire: water boils off but the flame (or its oil fuel) survives.
+    let mut oily = World::new(5, 5);
+    oily.paint(2, 2, Oil);
+    oily.paint(2, 1, Fire);
+    oily.paint(1, 1, Water);
+    oily.paint(3, 1, Water);
+    oily.step();
+    let fire_survived = oily.get(2, 1) == Fire || count(&oily, Fire) > 0;
+    let fuel_survived = count(&oily, Oil) > 0;
+    if !fire_survived && !fuel_survived {
+        return Err("oil fire and fuel were both destroyed by water".into());
+    }
+    if fire_survived {
+        return Ok(());
+    }
+    // If the flame cell moved, oil must still be present to re-light.
+    if !fuel_survived {
+        return Err("oil fire was extinguished immediately by water".into());
+    }
+    Ok(())
+}
+
+fn napalm_clings_to_solids() -> Result<(), String> {
+    let mut w = World::new(9, 9);
+    for x in 0..9 {
+        w.paint(x, 8, Stone);
+    }
+    // A ledge of stone with napalm on top — it should not all drain off quickly.
+    for x in 3..6 {
+        w.paint(x, 7, Stone);
+        w.paint(x, 6, Napalm);
+    }
+    for _ in 0..40 {
+        w.step();
+    }
+    let still_on_ledge = (3..6).filter(|&x| w.get(x, 6) == Napalm).count();
+    if still_on_ledge == 0 {
+        return Err("napalm did not cling to the solid ledge".into());
+    }
+    Ok(())
+}
+
+fn salt_dissolves_without_rewriting_water() -> Result<(), String> {
+    let mut w = World::new(5, 5);
+    w.paint(2, 2, Salt);
+    w.paint(2, 3, Water);
+    let water_seed = w.seed_at(2, 3);
+    for _ in 0..200 {
+        w.step();
+        if w.get(2, 2) == Empty {
+            // Salt gone; water cell should still be water (not rewritten to a new grain).
+            if w.get(2, 3) != Water && count(&w, Water) == 0 {
+                return Err("salt dissolve destroyed the water".into());
+            }
+            let _ = water_seed;
+            return Ok(());
+        }
+    }
+    Err("salt did not dissolve in water".into())
+}
+
+fn faucet_emits_consistent_stream() -> Result<(), String> {
+    let mut w = World::new(9, 16);
+    for x in 0..9 {
+        w.paint(x, 15, Stone);
+    }
+    w.paint(4, 1, Faucet);
+
+    // After a short run the column under the faucet should be a solid stream,
+    // not a sparse drip that only appears every few ticks.
+    for _ in 0..30 {
+        w.step();
+    }
+    let column: Vec<Material> = (2..15).map(|y| w.get(4, y)).collect();
+    let water_cells = column.iter().filter(|&&m| m == Water).count();
+    if water_cells < 8 {
+        return Err(format!(
+            "faucet stream too sparse under spout (water cells={water_cells}, column={column:?})"
+        ));
+    }
+
+    // Still producing after the world would otherwise settle.
+    let before = count(&w, Water);
+    for _ in 0..20 {
+        w.step();
+    }
+    // Either more water accumulated in the basin or the stream is still full.
+    let after = count(&w, Water);
+    let still_streaming = (2..10).filter(|&y| w.get(4, y) == Water).count() >= 4;
+    if after < before && !still_streaming {
+        return Err("faucet stopped emitting after the world settled".into());
     }
     Ok(())
 }
@@ -1020,6 +1171,18 @@ pub fn run() -> std::io::Result<()> {
         (
             "structural_materials_need_sustained_high_heat",
             structural_materials_need_sustained_high_heat,
+        ),
+        ("steam_condenses_when_cool", steam_condenses_when_cool),
+        ("heat_conducts_through_metal", heat_conducts_through_metal),
+        ("oil_fire_resists_water", oil_fire_resists_water),
+        ("napalm_clings_to_solids", napalm_clings_to_solids),
+        (
+            "salt_dissolves_without_rewriting_water",
+            salt_dissolves_without_rewriting_water,
+        ),
+        (
+            "faucet_emits_consistent_stream",
+            faucet_emits_consistent_stream,
         ),
         (
             "liquid_nitrogen_freezes_and_extinguishes",

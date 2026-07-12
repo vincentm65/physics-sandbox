@@ -163,8 +163,8 @@ pub struct App {
     pub pan_start: Option<((u16, u16), (i32, i32))>,
     /// Optional selection in inclusive world coordinates.
     pub selection: Option<((i32, i32), (i32, i32))>,
-    /// Copied cells, including material lifetime and seed.
-    pub clipboard: Vec<(Material, u16, u8)>,
+    /// Copied cells, including material lifetime, seed, and temperature.
+    pub clipboard: Vec<(Material, u16, u8, i16)>,
     pub clipboard_size: (usize, usize),
     /// Paste copied cells at the next click(s).
     pub pasting: bool,
@@ -588,7 +588,7 @@ impl App {
         y: i32,
         world_width: usize,
         world_height: usize,
-    ) -> Option<(Material, u16, u8)> {
+    ) -> Option<(Material, u16, u8, i16)> {
         if !self.pasting {
             return None;
         }
@@ -796,7 +796,7 @@ fn paint_state(
     world: &mut World,
     x: i32,
     y: i32,
-    state: (Material, u16, u8),
+    state: (Material, u16, u8, i16),
     mirror: Option<MirrorAxis>,
 ) {
     if x < 0 || y < 0 {
