@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear},
 };
 
-use crate::app::App;
+use crate::app::{App, EditorTool};
 use crate::material::Material;
 use crate::world::World;
 
@@ -16,6 +16,9 @@ pub fn draw(frame: &mut Frame, world: &World, app: &App) {
     let area = frame.area();
     draw_grid(frame, world, app, &area);
     draw_status(frame, app, &area);
+    if app.tool_picker_open {
+        draw_tool_picker(frame, &area, app);
+    }
     if app.picker_open {
         draw_picker(frame, &area, app);
     }
@@ -24,29 +27,74 @@ pub fn draw(frame: &mut Frame, world: &World, app: &App) {
     }
 }
 
-fn draw_grid(frame: &mut Frame, world: &World, _app: &App, area: &Rect) {
+fn draw_grid(frame: &mut Frame, world: &World, app: &App, area: &Rect) {
     let buf = frame.buffer_mut();
-    let gw = world.width.min(area.width as usize);
     let grid_rows = (area.height as usize).saturating_sub(1);
     let tick = world.tick();
-
-    // Half-block rendering: each terminal row holds two world rows. The upper
-    // half-block glyph (▀) paints the top world cell as fg, bottom as bg.
     for cy in 0..grid_rows {
-        let wtop = cy * 2;
-        let wbot = wtop + 1;
-        if wbot >= world.height {
-            break;
-        }
-        for cx in 0..gw {
-            let top = world.get(cx, wtop);
-            let bot = world.get(cx, wbot);
-            let tc = top.color(world.seed_at(cx, wtop), world.life_at(cx, wtop), tick);
-            let bc = bot.color(world.seed_at(cx, wbot), world.life_at(cx, wbot), tick);
-            if let Some(cell) = buf.cell_mut((area.x + cx as u16, area.y + cy as u16)) {
+        for cx in 0..area.width as usize {
+            let (wx, top_y, bottom_y) = if app.zoom == 2 {
+                (
+                    app.camera.0 + (cx / 2) as i32,
+                    app.camera.1 + cy as i32,
+                    None,
+                )
+            } else {
+                (
+                    app.camera.0 + cx as i32,
+                    app.camera.1 + (cy * 2) as i32,
+                    Some(app.camera.1 + (cy * 2 + 1) as i32),
+                )
+            };
+            let cell = buf.cell_mut((area.x + cx as u16, area.y + cy as u16));
+            let Some(cell) = cell else {
+                continue;
+            };
+            if wx < 0 || top_y < 0 || wx as usize >= world.width || top_y as usize >= world.height {
+                continue;
+            }
+            let ghost_top = app.paste_ghost_at(wx, top_y, world.width, world.height);
+            let top_color = ghost_top
+                .map(|(material, life, seed)| material.color(seed, life, tick))
+                .unwrap_or_else(|| {
+                    let top = world.get(wx as usize, top_y as usize);
+                    top.color(
+                        world.seed_at(wx as usize, top_y as usize),
+                        world.life_at(wx as usize, top_y as usize),
+                        tick,
+                    )
+                });
+            if let Some(bottom_y) = bottom_y {
+                let ghost_bottom = app.paste_ghost_at(wx, bottom_y, world.width, world.height);
+                let bottom_color = ghost_bottom
+                    .map(|(material, life, seed)| material.color(seed, life, tick))
+                    .unwrap_or_else(|| {
+                        let bottom = world.get(wx as usize, bottom_y as usize);
+                        bottom.color(
+                            world.seed_at(wx as usize, bottom_y as usize),
+                            world.life_at(wx as usize, bottom_y as usize),
+                            tick,
+                        )
+                    });
                 cell.set_char('▀');
-                cell.set_fg(tc);
-                cell.set_bg(bc);
+                cell.set_fg(top_color);
+                cell.set_bg(bottom_color);
+            } else {
+                cell.set_char(' ');
+                cell.set_bg(top_color);
+            }
+            let selected = app.preview_contains(wx, top_y) || app.selection_contains(wx, top_y);
+            let selected_bottom = bottom_y
+                .is_some_and(|y| app.preview_contains(wx, y) || app.selection_contains(wx, y));
+            if selected {
+                if app.zoom == 2 {
+                    cell.set_bg(Color::Rgb(255, 255, 255));
+                } else {
+                    cell.set_fg(Color::Rgb(255, 255, 255));
+                }
+            }
+            if selected_bottom {
+                cell.set_bg(Color::Rgb(255, 255, 255));
             }
         }
     }
@@ -71,9 +119,19 @@ fn draw_status(frame: &mut Frame, app: &App, area: &Rect) {
     let bar = brush_bar(app.brush);
     let paused = if app.paused { "   ‖ PAUSED" } else { "" };
     let scene = app.scene.name();
-    let s = format!(
-        "  ▀ {name}   Brush {bar}   Scene {scene}   N=Preset   Tab=Materials   Wheel/Arrows/[]=Size   Space=Pause  C=Clear  S=Saved  Q=Quit{paused}"
-    );
+    let tool = app.tool.name();
+    let mode = if app.editor_mode { "EDITOR" } else { "SIM" };
+    let mirror = app.mirror.map(|axis| axis.name()).unwrap_or("No mirror");
+    let paste = if app.pasting { "  PASTE: click" } else { "" };
+    let s = if app.editor_mode {
+        format!(
+            "  ▀ {name}   {mode} {tool}   {mirror}   Wheel=Zoom   Middle-drag=Pan   H/V=Mirror   Ctrl+C/V=Copy/Paste{paste}   E=Tools  S=Saved  F2=Play"
+        )
+    } else {
+        format!(
+            "  ▀ {name}   Tool {tool} (E)   Size {bar}   Scene {scene}   F2=Editor   Tab=Materials   Wheel/Arrows/[]=Size   Space=Pause  C=Clear  R=Reset  S=Saved  Q=Quit{paused}"
+        )
+    };
 
     for (i, ch) in s.chars().enumerate() {
         let x = area.x + i as u16;
@@ -103,6 +161,65 @@ fn draw_status(frame: &mut Frame, app: &App, area: &Rect) {
 /// Fixed-size dot gauge for the brush radius (0..=8).
 fn brush_bar(b: usize) -> String {
     (0..=8).map(|i| if i <= b { '●' } else { '·' }).collect()
+}
+
+pub fn tool_picker_rect(w: u16, h: u16) -> Rect {
+    let width = 26.min(w.saturating_sub(2));
+    let height = (EditorTool::ALL.len() as u16 + 2).min(h.saturating_sub(2));
+    Rect::new(
+        w.saturating_sub(width) / 2,
+        h.saturating_sub(height) / 2,
+        width,
+        height,
+    )
+}
+
+fn draw_tool_picker(frame: &mut Frame, area: &Rect, app: &App) {
+    let popup = tool_picker_rect(area.width, area.height);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Tools — Enter to pick, Esc to close ")
+            .style(
+                Style::default()
+                    .fg(Color::Rgb(210, 214, 224))
+                    .bg(Color::Rgb(18, 20, 30)),
+            ),
+        popup,
+    );
+
+    let buf = frame.buffer_mut();
+    let base_bg = Color::Rgb(18, 20, 30);
+    let hi_bg = Color::Rgb(44, 48, 66);
+    let accent = Color::Rgb(255, 220, 120);
+    for (index, tool) in EditorTool::ALL.iter().enumerate() {
+        let y = popup.y + 1 + index as u16;
+        let selected = index == app.tool_picker_cursor;
+        for x in popup.x + 1..popup.x + popup.width.saturating_sub(1) {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_bg(if selected { hi_bg } else { base_bg });
+            }
+        }
+        putc(
+            buf,
+            popup.x + 1,
+            y,
+            if selected { '▶' } else { ' ' },
+            accent,
+            if selected { hi_bg } else { base_bg },
+        );
+        for (offset, ch) in tool.name().chars().enumerate() {
+            putc(
+                buf,
+                popup.x + 3 + offset as u16,
+                y,
+                ch,
+                Color::Rgb(210, 214, 224),
+                if selected { hi_bg } else { base_bg },
+            );
+        }
+    }
 }
 
 /// Centred rect for the picker popup, clamped to the terminal.

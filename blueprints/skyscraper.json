@@ -1,0 +1,44 @@
+{
+  "name": "Riverside Tower Collapse",
+  "width": 150,
+  "height": 90,
+  "prefabs": {
+    "floor_bay": [
+      {"op":"rect", "x":0, "y":0, "width":9, "height":2, "material":"glass"},
+      {"op":"rect", "x":12, "y":0, "width":9, "height":2, "material":"glass"}
+    ],
+    "office": [
+      {"op":"rect", "x":0, "y":0, "width":7, "height":2, "material":"wood"},
+      {"op":"rect", "x":5, "y":-2, "width":2, "height":2, "material":"wood"}
+    ]
+  },
+  "operations": [
+    {"op":"terrain", "points":[[0,79],[30,80],[67,78],[104,80],[149,77]], "depth":10, "material":"stone"},
+    {"op":"vary", "x":0, "y":77, "width":150, "height":13, "from":"stone", "materials":["sand","coal"], "chance":0.08, "seed":29},
+    {"op":"rect", "x":39, "y":78, "width":76, "height":5, "material":"concrete"},
+
+    {"op":"rect", "x":47, "y":8, "width":60, "height":70, "material":"glass"},
+    {"op":"hollow_rect", "x":44, "y":5, "width":66, "height":73, "thickness":2, "material":"concrete"},
+    {"op":"repeat", "count":4, "offset":[17,0], "operations":[
+      {"op":"rect", "x":47, "y":7, "width":3, "height":71, "material":"metal"}
+    ]},
+    {"op":"repeat", "count":9, "offset":[0,8], "operations":[
+      {"op":"rect", "x":44, "y":13, "width":66, "height":2, "material":"concrete"},
+      {"op":"prefab", "name":"floor_bay", "x":51, "y":9},
+      {"op":"prefab", "name":"floor_bay", "x":82, "y":9},
+      {"op":"prefab", "name":"office", "x":54, "y":12},
+      {"op":"prefab", "name":"office", "x":88, "y":12}
+    ]},
+    {"op":"vary", "x":47, "y":8, "width":60, "height":68, "from":"glass", "materials":["empty","smoke"], "chance":0.09, "seed":71},
+
+    {"op":"rect", "x":65, "y":66, "width":3, "height":12, "material":"empty"},
+    {"op":"rect", "x":82, "y":66, "width":3, "height":12, "material":"empty"},
+    {"op":"tank", "x":70, "y":68, "width":11, "height":10, "wall":"metal", "contents":"oil", "fill":0.8},
+    {"op":"rect", "x":75, "y":66, "width":2, "height":2, "material":"fire"},
+
+    {"op":"line", "from":[1,84], "to":[35,82], "thickness":2, "material":"water"},
+    {"op":"line", "from":[116,82], "to":[148,80], "thickness":2, "material":"water"},
+    {"op":"hollow_rect", "x":118, "y":62, "width":21, "height":16, "thickness":2, "material":"stone"},
+    {"op":"rect", "x":121, "y":69, "width":15, "height":7, "material":"sand"}
+  ]
+}

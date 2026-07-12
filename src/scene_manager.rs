@@ -55,10 +55,10 @@ pub fn list_scenes() -> Result<Vec<String>, String> {
     for entry in fs::read_dir(&dir).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
         let path = entry.path();
-        if path.extension().map_or(false, |e| e == "json") {
-            if let Some(stem) = path.file_stem() {
-                names.push(stem.to_string_lossy().to_string());
-            }
+        if path.extension().is_some_and(|e| e == "json")
+            && let Some(stem) = path.file_stem()
+        {
+            names.push(stem.to_string_lossy().to_string());
         }
     }
     names.sort();

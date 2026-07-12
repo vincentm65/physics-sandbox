@@ -3,8 +3,9 @@
 
 use crate::app::App;
 use crate::material::Material;
-use crate::world::{Scene, World};
+use crate::world::{FUSE_BURN_TICKS, Scene, World};
 use Material::*;
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
 fn count(w: &World, m: Material) -> usize {
     (0..w.height)
@@ -37,6 +38,41 @@ fn sand_falls() -> Result<(), String> {
     let y = min_y(&w, Sand).ok_or("sand vanished")?;
     if y < 9 {
         return Err(format!("sand did not fall (ended at y={y})"));
+    }
+    Ok(())
+}
+
+fn fast_fall_is_bounded_and_cannot_tunnel() -> Result<(), String> {
+    let mut open = World::new(7, 8);
+    open.paint(3, 1, Sand);
+    open.step();
+    if open.get(3, 3) != Sand {
+        return Err("sand did not use its two-cell fall speed".into());
+    }
+
+    let mut blocked = World::new(7, 8);
+    for x in 0..7 {
+        blocked.paint(x, 2, Stone);
+    }
+    blocked.paint(3, 1, Sand);
+    blocked.step();
+    if blocked.get(3, 1) != Sand || blocked.get(3, 2) != Stone {
+        return Err("fast fall passed through a one-cell barrier".into());
+    }
+    Ok(())
+}
+
+fn water_prefers_route_to_lower_space() -> Result<(), String> {
+    let mut w = World::new(11, 7);
+    for x in 0..11 {
+        if x != 8 {
+            w.paint(x, 4, Stone);
+        }
+    }
+    w.paint(5, 3, Water);
+    w.step();
+    if w.get(8, 3) != Water {
+        return Err("water did not choose the nearby downward outlet".into());
     }
     Ok(())
 }
@@ -224,6 +260,19 @@ fn supported_wood_house_stays_together() -> Result<(), String> {
     }
     Ok(())
 }
+fn clear_resets_movement_bookkeeping() -> Result<(), String> {
+    let mut w = World::new(7, 7);
+    w.paint(3, 1, Wood);
+    w.step();
+
+    w.clear();
+    w.paint(3, 2, Wood);
+    w.step();
+    if w.get(3, 3) != Wood {
+        return Err("wood was skipped after resetting the world".into());
+    }
+    Ok(())
+}
 
 fn disconnected_wood_section_collapses() -> Result<(), String> {
     let mut w = World::new(14, 14);
@@ -274,6 +323,26 @@ fn fire_ignites_wood() -> Result<(), String> {
     let remaining = count(&w, Wood);
     if remaining >= initial {
         return Err(format!("wood did not burn (remaining={remaining})"));
+    }
+    Ok(())
+}
+
+fn fire_rises_through_smoke_to_ignite_wood() -> Result<(), String> {
+    let mut w = World::new(9, 8);
+    for y in 1..6 {
+        w.paint(3, y, Stone);
+        w.paint(5, y, Stone);
+    }
+    w.paint(4, 5, Stone);
+    w.paint(4, 2, Wood);
+    w.paint(4, 3, Smoke);
+    w.paint(4, 4, Fire);
+
+    for _ in 0..240 {
+        w.step();
+    }
+    if w.get(4, 2) == Wood {
+        return Err("smoke blocked fire from igniting wood above it".into());
     }
     Ok(())
 }
@@ -526,10 +595,12 @@ fn renders_picker() -> Result<(), String> {
     }
 
     // open: title + the cursor's material name appear
-    let mut app = App::default();
-    app.picker_open = true;
-    // Material::ALL[8] is Fire
-    app.picker_cursor = 8;
+    let app = App {
+        picker_open: true,
+        // Material::ALL[8] is Fire
+        picker_cursor: 8,
+        ..App::default()
+    };
     term.draw(|f| crate::ui::draw(f, &w, &app))
         .map_err(|e| e.to_string())?;
     let buf = term.backend().buffer();
@@ -550,6 +621,27 @@ fn renders_picker() -> Result<(), String> {
     }
     if !found_cursor {
         return Err("picker cursor marker missing".into());
+    }
+    Ok(())
+}
+fn quit_and_escape_priority() -> Result<(), String> {
+    let mut world = World::new(4, 4);
+    let q = Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+    let escape = Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+    if App::default().handle(&q, &mut world) {
+        return Err("Q did not request application exit".into());
+    }
+    if App::default().handle(&escape, &mut world) {
+        return Err("Esc did not request exit without an active overlay".into());
+    }
+
+    let mut app = App {
+        picker_open: true,
+        ..App::default()
+    };
+    if !app.handle(&escape, &mut world) || app.picker_open {
+        return Err("Esc did not close the material picker before quitting".into());
     }
     Ok(())
 }
@@ -633,11 +725,234 @@ fn restore_saved_scene_clips_to_current_world() -> Result<(), String> {
     Ok(())
 }
 
+fn gunpowder_explosion_damages_its_radius() -> Result<(), String> {
+    let mut w = World::new(17, 17);
+    let (cx, cy) = (8, 8);
+    for y in 3..=13 {
+        for x in 3..=13 {
+            w.paint(x, y, Stone);
+        }
+    }
+    w.paint(cx, cy, Gunpowder);
+    w.paint(cx, cy - 1, Fire);
+    w.step();
+
+    if w.get(cx + 4, cy) == Stone || w.get(cx, cy + 5) == Stone {
+        return Err("blast did not damage material inside its radius".into());
+    }
+    if w.get(cx + 5, cy + 5) != Stone {
+        return Err("blast damaged material outside its radius".into());
+    }
+    Ok(())
+}
+
+fn tnt_has_a_large_blast_radius() -> Result<(), String> {
+    let mut w = World::new(27, 27);
+    let (cx, cy) = (13, 13);
+    w.paint(cx + 10, cy, Stone);
+    w.paint(cx + 10, cy + 1, Stone);
+    w.paint(cx, cy, Tnt);
+    w.paint(cx, cy - 1, Fire);
+    w.step();
+
+    if w.get(cx + 10, cy) == Stone {
+        return Err("TNT did not damage material inside its blast radius".into());
+    }
+    if w.get(cx + 10, cy + 1) != Stone {
+        return Err("TNT damaged material outside its blast radius".into());
+    }
+    Ok(())
+}
+
+fn new_fuels_ignite() -> Result<(), String> {
+    for fuel in [Coal, Napalm] {
+        let mut w = World::new(5, 5);
+        w.paint(2, 3, fuel);
+        w.paint(2, 2, Fire);
+        for _ in 0..10 {
+            w.step();
+        }
+        if w.get(2, 3) == fuel {
+            return Err(format!("{} did not ignite", fuel.name()));
+        }
+    }
+    Ok(())
+}
+
+fn fuse_burns_progressively() -> Result<(), String> {
+    let mut w = World::new(9, 3);
+    // Horizontal fuse line of 5 cells, TNT at the right end, spark at the left.
+    for x in 1..=5 {
+        w.paint(x, 1, Fuse);
+    }
+    w.paint(6, 1, Tnt);
+    w.paint(0, 1, Fire);
+
+    w.step();
+
+    // After one tick only the spark-adjacent cell is lit; the rest of the fuse
+    // is still dormant. The burn front must walk the line over time, not flash
+    // the whole component in a single tick.
+    if w.get(1, 1) != Fuse || w.life_at(1, 1) == 0 {
+        return Err(format!(
+            "fuse cell (1, 1) did not light (got {}, life {})",
+            w.get(1, 1).name(),
+            w.life_at(1, 1)
+        ));
+    }
+    for x in 2..=5 {
+        if w.get(x, 1) != Fuse || w.life_at(x, 1) != 0 {
+            return Err(format!(
+                "fuse cell ({}, 1) lit prematurely (got {}, life {})",
+                x,
+                w.get(x, 1).name(),
+                w.life_at(x, 1)
+            ));
+        }
+    }
+
+    // Let the front travel. The near cell flares to fire while the far end is
+    // still dormant fuse, proving the burn is gradual rather than instant.
+    for _ in 0..(FUSE_BURN_TICKS + 1) {
+        w.step();
+    }
+    // The near cell has flared (it is now fire, or empty because the flame
+    // rose away) while the far end is still dormant fuse — proof the burn is
+    // gradual rather than the whole component flashing in one tick.
+    if w.get(1, 1) == Fuse {
+        return Err(format!(
+            "fuse cell (1, 1) did not flare (still {}, life {})",
+            w.get(1, 1).name(),
+            w.life_at(1, 1)
+        ));
+    }
+    if w.get(5, 1) != Fuse || w.life_at(5, 1) != 0 {
+        return Err(format!(
+            "far fuse cell (5, 1) burned prematurely (got {}, life {})",
+            w.get(5, 1).name(),
+            w.life_at(5, 1)
+        ));
+    }
+
+    // Eventually the whole fuse burns through and the TNT detonates.
+    for _ in 0..40 {
+        w.step();
+    }
+    if w.get(6, 1) == Tnt {
+        return Err("TNT next to burnt fuse did not detonate".into());
+    }
+
+    // Unlit fuse with no heat source stays dormant fuse.
+    let mut w2 = World::new(5, 5);
+    for x in 1..=4 {
+        w2.paint(x, 2, Fuse);
+    }
+    for _ in 0..10 {
+        w2.step();
+    }
+    for x in 1..=4 {
+        if w2.get(x, 2) != Fuse || w2.life_at(x, 2) != 0 {
+            return Err(format!(
+                "unheated fuse ({}, 2) changed to {} (life {})",
+                x,
+                w2.get(x, 2).name(),
+                w2.life_at(x, 2)
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn structural_materials_need_sustained_high_heat() -> Result<(), String> {
+    for material in [Glass, Stone, Concrete] {
+        let (_, delay, burn_life) = material.combustion().ok_or("missing combustion profile")?;
+
+        let mut ordinary_fire = World::new(3, 3);
+        ordinary_fire.paint(1, 1, material);
+        for x in 0..3 {
+            for y in 0..3 {
+                if (x, y) != (1, 1) {
+                    ordinary_fire.paint(x, y, Fire);
+                }
+            }
+        }
+        for _ in 0..delay + 10 {
+            ordinary_fire.step();
+        }
+        if ordinary_fire.get(1, 1) != material {
+            return Err(format!("{} ignited from ordinary fire", material.name()));
+        }
+
+        let mut high_heat = World::new(3, 3);
+        high_heat.paint(1, 1, material);
+        for x in 0..3 {
+            for y in 0..3 {
+                if (x, y) != (1, 1) {
+                    high_heat.paint(x, y, Lava);
+                }
+            }
+        }
+        for _ in 0..delay - 1 {
+            high_heat.step();
+        }
+        if high_heat.get(1, 1) != material {
+            return Err(format!("{} ignited before its delay", material.name()));
+        }
+        high_heat.step();
+        if high_heat.get(1, 1) != Fire {
+            return Err(format!(
+                "{} did not ignite from sustained lava heat",
+                material.name()
+            ));
+        }
+        if burn_life < 700 {
+            return Err(format!("{} burns too quickly", material.name()));
+        }
+    }
+    Ok(())
+}
+
+fn liquid_nitrogen_freezes_and_extinguishes() -> Result<(), String> {
+    let mut freezing = World::new(5, 5);
+    freezing.paint(2, 3, LiquidNitrogen);
+    freezing.paint(2, 2, Water);
+    freezing.step();
+    if freezing.get(2, 2) != Ice {
+        return Err("liquid nitrogen did not freeze water".into());
+    }
+
+    let mut quenching = World::new(5, 5);
+    quenching.paint(2, 3, LiquidNitrogen);
+    quenching.paint(2, 2, Fire);
+    quenching.step();
+    if quenching.get(2, 3) != Steam || quenching.get(2, 2) == Fire {
+        return Err("liquid nitrogen did not extinguish fire".into());
+    }
+    Ok(())
+}
+
+fn c4_blast_respects_structural_materials() -> Result<(), String> {
+    let mut w = World::new(31, 31);
+    let (cx, cy) = (15, 15);
+    w.paint(cx + 10, cy, Stone);
+    w.paint(cx + 8, cy, Glass);
+    w.paint(cx + 7, cy, Metal);
+    w.paint(cx + 6, cy, Concrete);
+    w.paint(cx, cy, C4);
+    w.paint(cx, cy - 1, Fire);
+    w.step();
+
+    if w.get(cx + 10, cy) == Stone || w.get(cx + 8, cy) != Sand {
+        return Err("C4 did not damage stone and shatter glass".into());
+    }
+    if w.get(cx + 7, cy) != Metal || w.get(cx + 6, cy) != Concrete {
+        return Err("blast-resistant material was destroyed".into());
+    }
+    Ok(())
+}
+
 fn preset_scenes_load_and_run() -> Result<(), String> {
-    for scene in Scene::ALL
-        .into_iter()
-        .filter(|scene| *scene != Scene::Blank)
-    {
+    for scene in Scene::ALL {
         let mut world = World::new(80, 40);
         world.load_scene(scene);
         if count(&world, Empty) == world.width * world.height {
@@ -653,6 +968,14 @@ fn preset_scenes_load_and_run() -> Result<(), String> {
 pub fn run() -> std::io::Result<()> {
     let tests: &[(&str, Test)] = &[
         ("sand_falls", sand_falls),
+        (
+            "fast_fall_is_bounded_and_cannot_tunnel",
+            fast_fall_is_bounded_and_cannot_tunnel,
+        ),
+        (
+            "water_prefers_route_to_lower_space",
+            water_prefers_route_to_lower_space,
+        ),
         ("wall_immovable", wall_is_immovable),
         ("water_spreads", water_spreads),
         ("sand_sinks_in_water", sand_sinks_in_water),
@@ -668,16 +991,44 @@ pub fn run() -> std::io::Result<()> {
             supported_wood_house_stays_together,
         ),
         (
+            "clear_resets_movement_bookkeeping",
+            clear_resets_movement_bookkeeping,
+        ),
+        (
             "disconnected_wood_section_collapses",
             disconnected_wood_section_collapses,
         ),
         ("fire_ignites_wood", fire_ignites_wood),
+        (
+            "fire_rises_through_smoke_to_ignite_wood",
+            fire_rises_through_smoke_to_ignite_wood,
+        ),
+        ("quit_and_escape_priority", quit_and_escape_priority),
         ("lava_plus_water_makes_stone", lava_meets_water),
         ("acid_dissolves", acid_dissolves),
         ("steam_rises", steam_rises),
         ("fire_leaves_ash", fire_leaves_ash),
         ("fire_produces_smoke", fire_produces_smoke),
         ("water_levels_out", water_levels_out),
+        (
+            "gunpowder_explosion_damages_its_radius",
+            gunpowder_explosion_damages_its_radius,
+        ),
+        ("tnt_has_a_large_blast_radius", tnt_has_a_large_blast_radius),
+        ("new_fuels_ignite", new_fuels_ignite),
+        ("fuse_burns_progressively", fuse_burns_progressively),
+        (
+            "structural_materials_need_sustained_high_heat",
+            structural_materials_need_sustained_high_heat,
+        ),
+        (
+            "liquid_nitrogen_freezes_and_extinguishes",
+            liquid_nitrogen_freezes_and_extinguishes,
+        ),
+        (
+            "c4_blast_respects_structural_materials",
+            c4_blast_respects_structural_materials,
+        ),
         (
             "million_cell_sparse_world_steps",
             million_cell_sparse_world_steps,

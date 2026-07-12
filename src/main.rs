@@ -10,6 +10,7 @@ use crossterm::{
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 mod app;
+mod blueprint;
 mod material;
 mod scene_manager;
 mod selftest;
@@ -40,9 +41,12 @@ impl Drop for TerminalGuard {
 }
 
 fn main() -> io::Result<()> {
-    // `physics-sandbox --selftest` runs headless simulation checks.
-    if std::env::args().any(|a| a == "--selftest") {
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--selftest") {
         return selftest::run();
+    }
+    if let Some(result) = run_map_command(&args) {
+        return result;
     }
 
     let mut app = App::default();
@@ -67,6 +71,49 @@ fn main() -> io::Result<()> {
     run(&mut terminal, &mut world, &mut app)
 }
 
+fn run_map_command(args: &[String]) -> Option<io::Result<()>> {
+    let (command, path) = match args {
+        [_, command, path] if command == "--map-validate" || command == "--map-build" => {
+            (command.as_str(), std::path::Path::new(path))
+        }
+        _ => return None,
+    };
+
+    let result = (|| -> Result<(), String> {
+        let blueprint = blueprint::load(path)?;
+        let warnings = blueprint.validate()?;
+        println!(
+            "Valid: {} ({}x{}, {} operations)",
+            blueprint.name,
+            blueprint.width,
+            blueprint.height,
+            blueprint.operations.len()
+        );
+        for warning in warnings {
+            println!("Warning: {warning}");
+        }
+        if command == "--map-build" {
+            let state = blueprint.scene_state()?;
+            scene_manager::save_scene_state(&state)?;
+            println!("Saved scene: {}", state.name);
+        }
+        Ok(())
+    })();
+
+    Some(result.map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error)))
+}
+
+fn handle_event(ev: Event, world: &mut World, app: &mut App) -> bool {
+    match ev {
+        Event::Resize(w, h) => {
+            let usable = (h as usize).saturating_sub(1);
+            world.resize(w as usize, usable.saturating_mul(2));
+            true
+        }
+        ev => app.handle(&ev, world),
+    }
+}
+
 fn run(terminal: &mut Terminal<Backend>, world: &mut World, app: &mut App) -> io::Result<()> {
     let mut last = Instant::now();
     let mut step_acc = 0u32;
@@ -74,16 +121,8 @@ fn run(terminal: &mut Terminal<Backend>, world: &mut World, app: &mut App) -> io
     loop {
         // Drain any pending input.
         while event::poll(Duration::ZERO)? {
-            match event::read()? {
-                Event::Resize(w, h) => {
-                    let usable = (h as usize).saturating_sub(1);
-                    world.resize(w as usize, usable.saturating_mul(2));
-                }
-                ev => {
-                    if !app.handle(&ev, world) {
-                        return Ok(());
-                    }
-                }
+            if !handle_event(event::read()?, world, app) {
+                return Ok(());
             }
         }
 
@@ -107,16 +146,8 @@ fn run(terminal: &mut Terminal<Backend>, world: &mut World, app: &mut App) -> io
         if !event::poll(POLL_WAIT)? {
             continue;
         }
-        match event::read()? {
-            Event::Resize(w, h) => {
-                let usable = (h as usize).saturating_sub(1);
-                world.resize(w as usize, usable.saturating_mul(2));
-            }
-            ev => {
-                if !app.handle(&ev, world) {
-                    return Ok(());
-                }
-            }
+        if !handle_event(event::read()?, world, app) {
+            return Ok(());
         }
     }
 }

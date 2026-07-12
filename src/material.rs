@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 /// Every substance in the sandbox.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Material {
     Empty,
     Stone,
@@ -22,6 +23,15 @@ pub enum Material {
     Gunpowder,
     Plant,
     Mercury,
+    Tnt,
+    Fuse,
+    C4,
+    Napalm,
+    Coal,
+    Glass,
+    Metal,
+    LiquidNitrogen,
+    Concrete,
 }
 
 use Material::*;
@@ -42,14 +52,37 @@ impl Material {
     ];
 
     /// Every material, grouped by phase, in the order the picker lists them.
-    /// (Ice, Gunpowder, Plant have no number key, so the picker is the only way to
-    ///  reach them.)
-    pub const ALL: [Material; 18] = [
+    pub const ALL: [Material; 27] = [
         // powders / granular
-        Sand, Ash, Salt, Gunpowder, // liquids
-        Water, Oil, Acid, Lava, Mercury, // solids
-        Stone, Wood, Ice, Plant, // fire & gases
-        Fire, Ember, Steam, Smoke, // tools
+        Sand,
+        Ash,
+        Salt,
+        Gunpowder,
+        Coal,
+        // liquids
+        Water,
+        Oil,
+        Napalm,
+        Acid,
+        Lava,
+        LiquidNitrogen,
+        Mercury,
+        // solids and explosives
+        Stone,
+        Concrete,
+        Metal,
+        Glass,
+        Wood,
+        Ice,
+        Plant,
+        Fuse,
+        Tnt,
+        C4,
+        // fire, gases, and tools
+        Fire,
+        Ember,
+        Steam,
+        Smoke,
         Empty,
     ];
 
@@ -73,6 +106,15 @@ impl Material {
             Gunpowder => "Gunpowder",
             Plant => "Plant",
             Mercury => "Mercury",
+            Tnt => "TNT",
+            Fuse => "Fuse",
+            C4 => "C4",
+            Napalm => "Napalm",
+            Coal => "Coal",
+            Glass => "Glass",
+            Metal => "Metal",
+            LiquidNitrogen => "Liquid nitrogen",
+            Concrete => "Concrete",
         }
     }
 
@@ -94,36 +136,58 @@ impl Material {
             Stone => 7,
             Gunpowder => 8,
             Mercury => 12,
+            Napalm => 2,
+            LiquidNitrogen => 1,
+            Coal => 6,
+            Glass => 7,
+            Concrete => 10,
+            Metal => 14,
             _ => 0,
         }
     }
 
     pub fn is_liquid(self) -> bool {
-        matches!(self, Water | Oil | Acid | Lava | Mercury)
+        matches!(
+            self,
+            Water | Oil | Napalm | Acid | Lava | LiquidNitrogen | Mercury
+        )
     }
     pub fn is_empty(self) -> bool {
         matches!(self, Empty)
     }
+    pub fn is_gas(self) -> bool {
+        matches!(self, Fire | Steam | Smoke)
+    }
     /// Anything gravity/buoyancy can displace by swapping cells.
     pub fn is_fluid(self) -> bool {
-        matches!(
-            self,
-            Water
-                | Oil
-                | Acid
-                | Lava
-                | Mercury
-                | Sand
-                | Steam
-                | Ash
-                | Ember
-                | Smoke
-                | Salt
-                | Gunpowder
-        )
+        self.is_gas()
+            || self.is_liquid()
+            || matches!(self, Sand | Ash | Ember | Salt | Gunpowder | Coal)
     }
+    pub fn can_sink_into(self, other: Material) -> bool {
+        other.is_empty() || (other.is_fluid() && self.density() > other.density())
+    }
+
+    /// Combustible materials, including heat-resistant structural materials.
     pub fn flammable(self) -> bool {
-        matches!(self, Wood | Oil | Plant)
+        self.combustion().is_some()
+    }
+
+    /// `(minimum source temperature, ignition delay, burn lifetime)`.
+    /// Temperatures are approximate Celsius values used to distinguish ordinary
+    /// flame from hotter lava; delays and lifetimes are simulation ticks.
+    pub fn combustion(self) -> Option<(u16, u16, u16)> {
+        match self {
+            Plant => Some((230, 24, 100)),
+            Napalm => Some((250, 24, 300)),
+            Wood => Some((300, 48, 160)),
+            Oil => Some((350, 24, 120)),
+            Coal => Some((500, 64, 550)),
+            Glass => Some((1_100, 90, 700)),
+            Stone => Some((1_200, 150, 1_000)),
+            Concrete => Some((1_250, 180, 1_200)),
+            _ => None,
+        }
     }
 
     /// Stable on-disk encoding. Keep this independent from `ALL`, which is UI order.
@@ -152,6 +216,15 @@ impl Material {
             15 => Some(Gunpowder),
             16 => Some(Plant),
             17 => Some(Mercury),
+            18 => Some(Tnt),
+            19 => Some(Fuse),
+            20 => Some(C4),
+            21 => Some(Napalm),
+            22 => Some(Coal),
+            23 => Some(Glass),
+            24 => Some(Metal),
+            25 => Some(LiquidNitrogen),
+            26 => Some(Concrete),
             _ => None,
         }
     }
@@ -198,6 +271,22 @@ impl Material {
             Gunpowder => Color::Rgb(rs(42, 12), rs(40, 12), rs(38, 12)),
             Plant => Color::Rgb(rs(30, 18), rs(148, 30), rs(30, 18)),
             Mercury => Color::Rgb(rs(168, 18), rs(172, 18), rs(180, 18)),
+            Tnt => Color::Rgb(rs(205, 35), rs(24, 18), rs(18, 12)),
+            Fuse => {
+                if life > 0 {
+                    // Burning fuse tip: hot pulsing glow as the front passes.
+                    Color::Rgb(rt(240, 15), rt(150, 40), rt(40, 20))
+                } else {
+                    Color::Rgb(rs(110, 24), rs(82, 20), rs(42, 16))
+                }
+            }
+            C4 => Color::Rgb(rs(76, 24), rs(92, 24), rs(38, 14)),
+            Napalm => Color::Rgb(rt(220, 30), rt(72, 35), rt(18, 16)),
+            Coal => Color::Rgb(rs(24, 16), rs(24, 16), rs(28, 18)),
+            Glass => Color::Rgb(rs(145, 30), rs(205, 25), rs(220, 25)),
+            Metal => Color::Rgb(rs(150, 35), rs(158, 35), rs(168, 35)),
+            LiquidNitrogen => Color::Rgb(rs(180, 25), rs(225, 25), 250),
+            Concrete => Color::Rgb(rs(105, 22), rs(105, 22), rs(100, 22)),
         }
     }
 }

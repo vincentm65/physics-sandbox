@@ -7,32 +7,17 @@ use Material::*;
 /// A loadable scene preset.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Scene {
-    Blank,
     House,
-    Volcano,
-    Aquarium,
-    Foundry,
-    Rainstorm,
+    Skyscraper,
 }
 
 impl Scene {
-    pub const ALL: [Scene; 6] = [
-        Scene::Blank,
-        Scene::House,
-        Scene::Volcano,
-        Scene::Aquarium,
-        Scene::Foundry,
-        Scene::Rainstorm,
-    ];
+    pub const ALL: [Scene; 2] = [Scene::House, Scene::Skyscraper];
 
     pub fn name(self) -> &'static str {
         match self {
-            Scene::Blank => "Blank",
-            Scene::House => "House",
-            Scene::Volcano => "Volcano",
-            Scene::Aquarium => "Aquarium",
-            Scene::Foundry => "Foundry",
-            Scene::Rainstorm => "Rainstorm",
+            Scene::House => "House Cross-Section",
+            Scene::Skyscraper => "Skyscraper Cross-Section",
         }
     }
 
@@ -48,15 +33,24 @@ impl Scene {
 }
 
 /// Lifetime bounds (in ticks).
-const FIRE_LIFE_MIN: u16 = 30;
-const FIRE_LIFE_MAX: u16 = 70;
+const FIRE_LIFE_MIN: u16 = 60;
+const FIRE_LIFE_MAX: u16 = 100;
 const EMBER_LIFE_MIN: u16 = 80;
 const EMBER_LIFE_MAX: u16 = 170;
 const STEAM_LIFE_MIN: u16 = 120;
 const STEAM_LIFE_MAX: u16 = 280;
 const SMOKE_LIFE_MIN: u16 = 80;
 const SMOKE_LIFE_MAX: u16 = 180;
+const GUNPOWDER_BLAST_RADIUS: i32 = 5;
+const TNT_BLAST_RADIUS: i32 = 10;
+const C4_BLAST_RADIUS: i32 = 12;
+/// Ticks a fuse cell smoulders before flaring to fire and kindling its
+/// neighbours. Sets the burn-front pace: one cell advances per this many ticks.
+pub(crate) const FUSE_BURN_TICKS: u16 = 3;
 
+const FIRE_TEMPERATURE: u16 = 900;
+const EMBER_TEMPERATURE: u16 = 700;
+const LAVA_TEMPERATURE: u16 = 1_300;
 const CHUNK_W: usize = 64;
 const CHUNK_H: usize = 32;
 
@@ -68,9 +62,18 @@ const ASH_CHANCE_PER_MILLE: u32 = 50;
 /// lava stays viscous.
 fn spread_of(m: Material) -> usize {
     match m {
-        Water => 6,
-        Acid => 4,
-        Oil => 4,
+        Water | LiquidNitrogen => 6,
+        Acid | Oil => 4,
+        _ => 1,
+    }
+}
+
+/// Maximum number of downward cells a material can traverse in one tick.
+/// Faster materials still check every intermediate cell, so thin floors cannot
+/// be skipped.
+fn fall_speed_of(m: Material) -> usize {
+    match m {
+        Water | LiquidNitrogen | Mercury | Sand | Salt | Gunpowder => 2,
         _ => 1,
     }
 }
@@ -147,7 +150,7 @@ impl World {
             chunks_x: chunks_x(width),
             chunks_y: chunks_y(height),
             tick: 0,
-            scene: Scene::Blank,
+            scene: Scene::House,
         }
     }
 
@@ -180,6 +183,25 @@ impl World {
         self.life[i] = rand_life(m);
         self.activate_now(x, y);
     }
+    /// Return a cell including its visual and lifetime state for editor copy/paste.
+    pub fn cell_state(&self, x: usize, y: usize) -> Option<(Material, u16, u8)> {
+        (x < self.width && y < self.height).then(|| {
+            let i = self.idx(x, y);
+            (self.grid[i], self.life[i], self.seed[i])
+        })
+    }
+
+    /// Restore a cell copied by the editor without regenerating its state.
+    pub fn paint_state(&mut self, x: usize, y: usize, state: (Material, u16, u8)) {
+        if x >= self.width || y >= self.height {
+            return;
+        }
+        let i = self.idx(x, y);
+        self.grid[i] = state.0;
+        self.life[i] = state.1;
+        self.seed[i] = state.2;
+        self.activate_now(x, y);
+    }
 
     pub fn clear(&mut self) {
         for i in 0..self.grid.len() {
@@ -188,6 +210,7 @@ impl World {
             self.seed[i] = rand::random();
         }
         self.tick = 0;
+        self.moved_tick.fill(u64::MAX);
         self.active_chunks.fill(false);
         self.next_active_chunks.fill(false);
         self.wood_seen.fill(false);
@@ -212,12 +235,8 @@ impl World {
         self.clear();
         self.scene = scene;
         match scene {
-            Scene::Blank => {}
             Scene::House => seed_house(self),
-            Scene::Volcano => seed_volcano(self),
-            Scene::Aquarium => seed_aquarium(self),
-            Scene::Foundry => seed_foundry(self),
-            Scene::Rainstorm => seed_rainstorm(self),
+            Scene::Skyscraper => seed_skyscraper(self),
         }
     }
 
@@ -362,6 +381,53 @@ impl World {
         }
     }
 
+    /// Move downward through at most `steps` adjacent cells. Each intermediate
+    /// cell is checked and swapped, preserving collision and displacement rules.
+    fn try_fall(
+        &mut self,
+        x: usize,
+        y: usize,
+        steps: usize,
+        allow: impl Fn(Material) -> bool,
+    ) -> bool {
+        let mut cy = y;
+        let mut moved = false;
+        for _ in 0..steps {
+            let Some((_, ty)) = self.adj(x, cy, 0, 1) else {
+                break;
+            };
+            if !self.try_into(x, cy, x, ty, &allow) {
+                break;
+            }
+            cy = ty;
+            moved = true;
+        }
+        moved
+    }
+
+    /// Score horizontal room in one direction, preferring routes that lead to
+    /// a downward opening. This approximates local liquid pressure without a
+    /// separate pressure grid.
+    fn flow_score(&self, x: usize, y: usize, dir: i32, range: usize) -> usize {
+        let mut cx = x;
+        for distance in 1..=range {
+            let Some((nx, _)) = self.adj(cx, y, dir, 0) else {
+                break;
+            };
+            if self.get(nx, y) != Empty {
+                break;
+            }
+            if self
+                .adj(nx, y, 0, 1)
+                .is_some_and(|(bx, by)| self.get(bx, by) == Empty)
+            {
+                return range + 1 - distance;
+            }
+            cx = nx;
+        }
+        0
+    }
+
     fn noise(&self, x: usize, y: usize, salt: u32) -> u32 {
         let i = self.idx(x, y);
         let mut n = (x as u32).wrapping_mul(0x9E37_79B9)
@@ -427,9 +493,7 @@ impl World {
     }
 
     fn wood_can_displace(&self, m: Material) -> bool {
-        m.is_empty()
-            || matches!(m, Fire | Steam | Smoke)
-            || (m.is_fluid() && Wood.density() > m.density())
+        m.is_empty() || m.is_gas() || (m.is_fluid() && Wood.density() > m.density())
     }
 
     fn component_can_translate(
@@ -624,8 +688,15 @@ impl World {
                         if self.moved_tick[i] == self.tick {
                             continue;
                         }
+                        let material = self.grid[i];
+                        if material.flammable() {
+                            self.activate_next(x, y);
+                            if self.step_combustible(x, y) {
+                                continue;
+                            }
+                        }
                         match self.grid[i] {
-                            Empty | Stone | Wood => continue,
+                            Empty | Stone | Wood | Glass | Metal | Concrete => continue,
                             Fire => {
                                 self.activate_next(x, y);
                                 self.step_fire(x, y);
@@ -638,8 +709,10 @@ impl World {
                                 self.activate_next(x, y);
                                 self.step_gas(x, y);
                             }
-                            Sand | Ash | Salt | Gunpowder => self.step_powder(x, y),
-                            Water | Oil => self.step_liquid(x, y),
+                            Sand | Ash | Salt | Gunpowder | Coal => self.step_powder(x, y),
+                            Water | Oil | Napalm | LiquidNitrogen | Mercury => {
+                                self.step_liquid(x, y)
+                            }
                             Acid | Lava => {
                                 self.activate_next(x, y);
                                 self.step_liquid(x, y);
@@ -652,7 +725,9 @@ impl World {
                                 self.activate_next(x, y);
                                 self.step_plant(x, y);
                             }
-                            Mercury => self.step_liquid(x, y),
+                            Fuse => self.step_fuse(x, y),
+                            Tnt => self.step_tnt(x, y),
+                            C4 => self.step_c4(x, y),
                         }
                     }
                 }
@@ -660,6 +735,134 @@ impl World {
         }
         std::mem::swap(&mut self.active_chunks, &mut self.next_active_chunks);
         self.tick = self.tick.wrapping_add(1);
+    }
+
+    fn explode(&mut self, x: usize, y: usize, radius: i32) {
+        let r2 = radius * radius;
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
+                if dx * dx + dy * dy > r2 {
+                    continue;
+                }
+                let Some((tx, ty)) = self.adj(x, y, dx, dy) else {
+                    continue;
+                };
+                let i = self.idx(tx, ty);
+                let material = self.grid[i];
+                if matches!(material, Metal | Concrete) {
+                    continue;
+                }
+                if material == Glass {
+                    self.put(i, Sand, 0);
+                    continue;
+                }
+                let roll = self.roll(tx, ty, 0x92);
+                if roll < 650 {
+                    self.put(i, Fire, rand_range(FIRE_LIFE_MIN, FIRE_LIFE_MAX));
+                } else if roll < 900 {
+                    self.put(i, Smoke, rand_range(SMOKE_LIFE_MIN / 2, SMOKE_LIFE_MAX / 2));
+                } else {
+                    self.put(i, Empty, 0);
+                }
+            }
+        }
+    }
+
+    fn step_combustible(&mut self, x: usize, y: usize) -> bool {
+        let i = self.idx(x, y);
+        let material = self.grid[i];
+        let Some((ignition_temperature, ignition_delay, burn_life)) = material.combustion() else {
+            return false;
+        };
+        let source_temperature = self
+            .n8(x, y)
+            .into_iter()
+            .flatten()
+            .map(|(nx, ny)| match self.grid[self.idx(nx, ny)] {
+                Lava => LAVA_TEMPERATURE,
+                Fire => FIRE_TEMPERATURE,
+                Ember => EMBER_TEMPERATURE,
+                _ => 0,
+            })
+            .max()
+            .unwrap_or(0);
+
+        if source_temperature < ignition_temperature {
+            self.life[i] = 0;
+            return false;
+        }
+
+        self.life[i] = self.life[i].saturating_add(1);
+        if self.life[i] < ignition_delay {
+            return false;
+        }
+
+        let burning = if matches!(material, Wood | Plant | Coal) {
+            Ember
+        } else {
+            Fire
+        };
+        self.put(i, burning, burn_life);
+        true
+    }
+
+    fn step_tnt(&mut self, x: usize, y: usize) {
+        if self.is_heated(x, y) {
+            self.explode(x, y, TNT_BLAST_RADIUS);
+        }
+    }
+
+    fn step_fuse(&mut self, x: usize, y: usize) {
+        self.activate_next(x, y);
+        let i = self.idx(x, y);
+
+        // Dormant fuse: light it only from an external heat source. Propagation
+        // along the fuse is push-driven by burning cells (below), so a single
+        // spark kindles one cell and the burn front then walks the rest at a
+        // fixed pace instead of flashing the whole component in a single tick.
+        if self.life[i] == 0 {
+            if self.is_heated(x, y) {
+                self.life[i] = FUSE_BURN_TICKS;
+                self.moved_tick[i] = self.tick;
+                self.activate_idx(i);
+            }
+            return;
+        }
+
+        // Burning fuse: smoulder down, then flare to fire and kindle the next
+        // layer of dormant fuse neighbours so the front advances one cell per
+        // FUSE_BURN_TICKS ticks. Marking freshly lit cells as moved this tick
+        // keeps the front to one layer per tick regardless of scan order.
+        self.life[i] = self.life[i].saturating_sub(1);
+        if self.life[i] != 0 {
+            return;
+        }
+        self.put(i, Fire, rand_range(FIRE_LIFE_MIN, FIRE_LIFE_MAX));
+        for n in self.n8(x, y) {
+            let Some((nx, ny)) = n else {
+                continue;
+            };
+            let ni = self.idx(nx, ny);
+            if self.grid[ni] == Fuse && self.life[ni] == 0 {
+                self.life[ni] = FUSE_BURN_TICKS;
+                self.moved_tick[ni] = self.tick;
+                self.activate_idx(ni);
+            }
+        }
+    }
+
+    fn is_heated(&self, x: usize, y: usize) -> bool {
+        self.n8(x, y)
+            .into_iter()
+            .flatten()
+            .any(|(nx, ny)| matches!(self.grid[self.idx(nx, ny)], Fire | Lava | Ember))
+    }
+
+    fn step_c4(&mut self, x: usize, y: usize) {
+        self.activate_next(x, y);
+        if self.is_heated(x, y) {
+            self.explode(x, y, C4_BLAST_RADIUS);
+        }
     }
 
     fn step_powder(&mut self, x: usize, y: usize) {
@@ -681,42 +884,16 @@ impl World {
             }
         }
 
-        // Gunpowder explodes near heat
-        if m == Gunpowder {
-            for n in self.n8(x, y) {
-                let Some((nx, ny)) = n else { continue };
-                let ni = self.idx(nx, ny);
-                let other = self.grid[ni];
-                if other == Fire || other == Lava || other == Ember {
-                    // propagate explosion to adjacent gunpowder
-                    for nn in self.n8(nx, ny) {
-                        let Some((nnx, nny)) = nn else { continue };
-                        let nni = self.idx(nnx, nny);
-                        if self.grid[nni] == Gunpowder && self.moved_tick[nni] != self.tick {
-                            let r = self.roll(nnx, nny, 0x92);
-                            if r < 700 {
-                                self.put(nni, Fire, rand_range(FIRE_LIFE_MIN, FIRE_LIFE_MAX));
-                            } else if r < 900 {
-                                self.put(nni, Smoke, rand_range(SMOKE_LIFE_MIN, SMOKE_LIFE_MAX));
-                            }
-                        }
-                    }
-                    self.put(i, Smoke, rand_range(SMOKE_LIFE_MIN / 2, SMOKE_LIFE_MAX / 2));
-                    // spawn fire at the heat source neighbor
-                    self.activate_next(nx, ny);
-                    return;
-                }
-            }
+        // Gunpowder destroys every material in its blast radius when heated.
+        if m == Gunpowder && self.is_heated(x, y) {
+            self.explode(x, y, GUNPOWDER_BLAST_RADIUS);
+            return;
         }
 
-        let sink = |t: Material| t.is_empty() || (t.is_fluid() && m.density() > t.density());
-        // Downward
-        if let Some((tx, ty)) = self.adj(x, y, 0, 1) {
-            let ti = self.idx(tx, ty);
-            if sink(self.grid[ti]) {
-                self.swap(i, ti);
-                return;
-            }
+        let sink = |other| m.can_sink_into(other);
+        // Downward, with bounded per-material speed.
+        if self.try_fall(x, y, fall_speed_of(m), sink) {
+            return;
         }
         // Diagonals
         let (d1, d2) = self.dirs(x, y, 0x10);
@@ -740,6 +917,7 @@ impl World {
             Lava => self.react_lava(x, y),
             Acid => self.react_acid(x, y),
             Water => self.react_water(x, y),
+            LiquidNitrogen => self.react_liquid_nitrogen(x, y),
             _ => false,
         };
         if consumed {
@@ -750,21 +928,17 @@ impl World {
             return;
         }
 
-        // lava is viscous: only flows every other tick
-        if m == Lava && !self.tick.is_multiple_of(2) {
+        // Lava and napalm are viscous.
+        if matches!(m, Lava | Napalm) && !self.tick.is_multiple_of(2) {
             return;
         }
 
-        let sink = |t: Material| t.is_empty() || (t.is_fluid() && m.density() > t.density());
+        let sink = |other| m.can_sink_into(other);
         let rise = |t: Material| t.is_fluid() && m.density() < t.density();
 
-        // Downward
-        if let Some((tx, ty)) = self.adj(x, y, 0, 1) {
-            let ti = self.idx(tx, ty);
-            if sink(self.grid[ti]) {
-                self.swap(i, ti);
-                return;
-            }
+        // Downward, with bounded per-material speed.
+        if self.try_fall(x, y, fall_speed_of(m), sink) {
+            return;
         }
         // Diagonals
         let (d1, d2) = self.dirs(x, y, 0x20);
@@ -781,15 +955,18 @@ impl World {
         if self.try_step(x, y, 0, -1, rise) {
             return;
         }
-        // buoyancy: lighter liquid rises through a denser one
-        if self.try_step(x, y, 0, -1, rise) {
-            return;
-        }
         // horizontal flow: travel several cells so a liquid levels out quickly
         // instead of piling into a thin column.
         let spread = spread_of(m);
         let empty = |t: Material| t.is_empty();
-        let (d1, d2) = self.dirs(x, y, 0x21);
+        let (random_first, random_second) = self.dirs(x, y, 0x21);
+        let left_score = self.flow_score(x, y, -1, spread);
+        let right_score = self.flow_score(x, y, 1, spread);
+        let (d1, d2) = match left_score.cmp(&right_score) {
+            std::cmp::Ordering::Greater => (-1, 1),
+            std::cmp::Ordering::Less => (1, -1),
+            std::cmp::Ordering::Equal => (random_first, random_second),
+        };
         if self.flow(x, y, d1, spread, empty) {
             return;
         }
@@ -812,6 +989,12 @@ impl World {
                 break;
             }
             cx += dir;
+            if self
+                .adj(cx as usize, y, 0, 1)
+                .is_some_and(|(bx, by)| self.get(bx, by) == Empty)
+            {
+                break;
+            }
         }
         cx != x as i32
     }
@@ -871,13 +1054,6 @@ impl World {
                 // water quenches fire: both turn to steam
                 self.put(ni, Steam, rand_range(STEAM_LIFE_MIN, STEAM_LIFE_MAX));
                 extinguished = true;
-            } else if other.flammable() && self.moved_tick[ni] != self.tick {
-                // wood smolders into glowing embers; oil flashes straight to flame
-                if other == Wood && self.chance(nx, ny, 0x41, 120) {
-                    self.put(ni, Ember, rand_range(EMBER_LIFE_MIN, EMBER_LIFE_MAX));
-                } else if other == Oil && self.chance(nx, ny, 0x42, 450) {
-                    self.put(ni, Fire, rand_range(FIRE_LIFE_MIN, FIRE_LIFE_MAX));
-                }
             }
         }
 
@@ -886,8 +1062,8 @@ impl World {
             return;
         }
 
-        // a little smoke wafts up off the flame
-        if self.chance(x, y, 0x43, 50)
+        // An occasional wisp of smoke wafts up off the flame.
+        if self.chance(x, y, 0x43, 20)
             && let Some((ux, uy)) = self.adj(x, y, 0, -1)
         {
             let ui = self.idx(ux, uy);
@@ -901,19 +1077,19 @@ impl World {
         if !self.chance(x, y, 0x44, 600) {
             return;
         }
-        let empty = |t: Material| t.is_empty();
-        // prefer sideways drift over straight-up so fire runs along surfaces
+        let passable = |t: Material| t.is_empty() || t == Smoke;
+        // Rising flame passes through smoke before trying to spread sideways.
+        if self.try_step(x, y, 0, -1, passable) {
+            return;
+        }
         let (d1, d2) = self.dirs(x, y, 0x40);
-        if self.try_step(x, y, d1, 0, empty) {
+        if self.try_step(x, y, d1, -1, passable) {
             return;
         }
-        if self.try_step(x, y, d2, 0, empty) {
+        if self.try_step(x, y, d1, 0, passable) {
             return;
         }
-        if self.try_step(x, y, 0, -1, empty) {
-            return;
-        }
-        let _ = self.try_step(x, y, d1, -1, empty);
+        let _ = self.try_step(x, y, d2, 0, passable);
     }
 
     /// Only `ASH_CHANCE` of cooled embers leave a residue of ash; the rest burn
@@ -949,18 +1125,12 @@ impl World {
                     self.put(ni, Steam, rand_range(STEAM_LIFE_MIN, STEAM_LIFE_MAX));
                     quenched = true;
                 }
-                Wood if self.moved_tick[ni] != self.tick && self.chance(nx, ny, 0x51, 50) => {
-                    self.put(ni, Ember, rand_range(EMBER_LIFE_MIN, EMBER_LIFE_MAX));
-                }
-                Oil if self.moved_tick[ni] != self.tick && self.chance(nx, ny, 0x52, 300) => {
-                    self.put(ni, Fire, rand_range(FIRE_LIFE_MIN, FIRE_LIFE_MAX));
-                }
-                Empty if ny < y => {
-                    // flames lick upward, with a wisp of smoke now and then
+                Empty | Smoke if ny < y => {
+                    // Flames can lick upward through smoke; smoke wisps are less common.
                     let r = self.roll(nx, ny, 0x53);
                     if r < 80 {
                         self.put(ni, Fire, rand_range(FIRE_LIFE_MIN, FIRE_LIFE_MAX));
-                    } else if r < 130 {
+                    } else if r < 100 {
                         self.put(ni, Smoke, rand_range(SMOKE_LIFE_MIN, SMOKE_LIFE_MAX));
                     }
                 }
@@ -973,10 +1143,9 @@ impl World {
             return;
         }
 
-        // settle slowly like a heavy grit
-        if self.chance(x, y, 0x54, 600) {
-            let sink =
-                |t: Material| t.is_empty() || (t.is_fluid() && Ember.density() > t.density());
+        // Embers mostly burn out where they form instead of piling up as grit.
+        if self.chance(x, y, 0x54, 100) {
+            let sink = |other| Ember.can_sink_into(other);
             if self.try_step(x, y, 0, 1, sink) {
                 return;
             }
@@ -988,6 +1157,23 @@ impl World {
         }
     }
 
+    fn react_liquid_nitrogen(&mut self, x: usize, y: usize) -> bool {
+        let i = self.idx(x, y);
+        for n in self.n4(x, y).into_iter().flatten() {
+            let ni = self.idx(n.0, n.1);
+            match self.grid[ni] {
+                Water => self.put(ni, Ice, 0),
+                Fire | Ember | Lava => {
+                    self.put(ni, if self.grid[ni] == Lava { Stone } else { Smoke }, 0);
+                    self.put(i, Steam, rand_range(STEAM_LIFE_MIN, STEAM_LIFE_MAX));
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
     fn react_lava(&mut self, x: usize, y: usize) -> bool {
         let mut solidified = false;
         for n in self.n4(x, y) {
@@ -995,18 +1181,9 @@ impl World {
                 continue;
             };
             let ni = self.idx(nx, ny);
-            match self.grid[ni] {
-                Water => {
-                    self.put(ni, Steam, rand_range(STEAM_LIFE_MIN, STEAM_LIFE_MAX));
-                    solidified = true;
-                }
-                Wood if self.moved_tick[ni] != self.tick && self.chance(nx, ny, 0x61, 400) => {
-                    self.put(ni, Ember, rand_range(EMBER_LIFE_MIN, EMBER_LIFE_MAX));
-                }
-                Oil if self.moved_tick[ni] != self.tick && self.chance(nx, ny, 0x62, 500) => {
-                    self.put(ni, Fire, rand_range(FIRE_LIFE_MIN, FIRE_LIFE_MAX));
-                }
-                _ => {}
+            if self.grid[ni] == Water {
+                self.put(ni, Steam, rand_range(STEAM_LIFE_MIN, STEAM_LIFE_MAX));
+                solidified = true;
             }
         }
         if solidified {
@@ -1023,7 +1200,7 @@ impl World {
             };
             let ni = self.idx(nx, ny);
             let other = self.grid[ni];
-            if other.is_empty() || other == Acid || other == Stone {
+            if other.is_empty() || matches!(other, Acid | Stone | Concrete | Metal | Glass) {
                 continue;
             }
             if self.chance(nx, ny, 0x70, 200) {
@@ -1148,323 +1325,214 @@ fn fill_rect(world: &mut World, x0: usize, y0: usize, x1: usize, y1: usize, m: M
     }
 }
 
-fn fill_disc(world: &mut World, cx: isize, cy: isize, r: isize, m: Material) {
-    let r2 = r * r;
-    for y in cy - r..=cy + r {
-        for x in cx - r..=cx + r {
-            if x >= 0 && y >= 0 && x < world.width as isize && y < world.height as isize {
-                let dx = x - cx;
-                let dy = y - cy;
-                if dx * dx + dy * dy <= r2 {
-                    world.paint(x as usize, y as usize, m);
-                }
-            }
-        }
-    }
-}
-
-/// A detailed three-story house built to showcase structural collapse, fire,
-/// fluid containment, and material reactions.
+/// A two-storey timber house cut through its rooms, attic, and basement.
 fn seed_house(world: &mut World) {
-    let w = world.width;
-    let h = world.height;
-    if w < 40 || h < 24 {
+    let (w, h) = (world.width, world.height);
+    if w < 48 || h < 30 {
         return;
     }
 
-    let ground = h - 2;
-    let left = w / 8;
-    let right = w * 7 / 8;
+    let ground = h - 3;
+    let left = w / 7;
+    let right = w * 6 / 7;
+    let basement = ground - 6;
+    let first_floor = ground - 13;
+    let attic_floor = ground - 22;
+    let roof_peak = attic_floor.saturating_sub(8);
     let center = (left + right) / 2;
-    let floor_h = ((ground - 8) / 3).max(5);
-    let bottom = ground - 2;
-    let top = bottom - floor_h * 3;
 
-    // Ground, basement slab, and a stone foundation keep the wood frame stable.
     fill_rect(world, 0, ground, w, h, Stone);
-    fill_rect(world, left - 2, bottom, right + 2, ground, Stone);
-    fill_rect(world, left, top, left + 2, bottom, Wood);
-    fill_rect(world, right - 2, top, right, bottom, Wood);
+    fill_rect(world, left - 3, basement, right + 3, ground, Concrete);
+    fill_rect(world, left - 1, basement + 2, right + 1, ground, Empty);
 
-    // Three independently furnished stories with continuous structural floors.
-    for story in 0..=3 {
-        let y = bottom - story * floor_h;
-        fill_rect(world, left, y, right, y + 1, Wood);
-    }
-    for &x in &[left + 2, center, right - 3] {
-        fill_rect(world, x, top, x + 1, bottom, Wood);
-    }
+    // Concrete foundation, timber frame, and floor joists expose the structure.
+    fill_rect(world, left, attic_floor, left + 2, basement, Wood);
+    fill_rect(world, right - 2, attic_floor, right, basement, Wood);
+    fill_rect(world, center - 1, attic_floor, center + 1, basement, Wood);
+    fill_rect(world, left, first_floor, right, first_floor + 1, Wood);
+    fill_rect(world, left, basement - 1, right, basement, Wood);
+    fill_rect(world, left, attic_floor, right, attic_floor + 1, Wood);
 
-    // Interior room dividers, each with a doorway.
-    for story in 0..3 {
-        let ceiling = bottom - (story + 1) * floor_h;
-        let floor = bottom - story * floor_h;
-        for &x in &[left + (right - left) / 3, left + (right - left) * 2 / 3] {
-            fill_rect(world, x, ceiling + 1, x + 1, floor, Wood);
-            fill_rect(world, x, floor - 3, x + 1, floor, Empty);
-        }
+    // Gabled roof, attic framing, brick chimney, and glazed windows.
+    for x in left - 3..right + 3 {
+        let distance = x.abs_diff(center);
+        let y = roof_peak + distance * (attic_floor - roof_peak) / (right - center + 2);
+        fill_rect(world, x, y, x + 1, y + 2, Wood);
     }
-
-    // Front door and paired windows on every level.
-    fill_rect(world, center - 2, bottom - 5, center + 3, bottom, Empty);
-    for story in 0..3 {
-        let floor = bottom - story * floor_h;
-        let window_top = floor.saturating_sub(5);
-        for &x in &[left, right - 1] {
-            fill_rect(world, x, window_top, x + 1, floor - 2, Empty);
-        }
-    }
-
-    // Alternating stair flights link all floors without blocking the rooms.
-    for story in 0..3 {
-        let floor = bottom - story * floor_h;
-        let stair_left = if story.is_multiple_of(2) {
-            center + 3
-        } else {
-            center.saturating_sub(floor_h + 4)
-        };
-        for step in 0..floor_h.saturating_sub(1) {
-            let x = stair_left + step;
-            let y = floor - 1 - step;
-            if x < right - 3 && y > top {
-                world.paint(x, y, Wood);
-                world.paint(x, y + 1, Wood);
-            }
-        }
+    let chimney = right - 8;
+    fill_rect(
+        world,
+        chimney,
+        roof_peak.saturating_sub(2),
+        chimney + 4,
+        first_floor,
+        Stone,
+    );
+    fill_rect(
+        world,
+        chimney + 1,
+        roof_peak.saturating_sub(1),
+        chimney + 3,
+        first_floor - 3,
+        Empty,
+    );
+    fill_rect(
+        world,
+        chimney - 1,
+        first_floor - 4,
+        chimney + 5,
+        first_floor,
+        Stone,
+    );
+    world.paint(chimney + 2, first_floor - 2, Ember);
+    for x in [left + 5, center - 7, center + 5, right - 7] {
+        fill_rect(world, x, attic_floor + 3, x + 3, attic_floor + 6, Glass);
+        fill_rect(world, x, first_floor + 3, x + 3, first_floor + 7, Glass);
     }
 
-    // Pitched stone roof protects the frame while leaving a usable attic.
-    let roof_h = top.saturating_sub(1).min((right - left) / 5).max(3);
-    for rise in 0..=roof_h {
-        let y = top - rise;
-        let inset = rise * (right - left) / 2 / roof_h;
-        let lx = left.saturating_sub(3) + inset;
-        let rx = (right + 3).saturating_sub(inset).min(w - 1);
-        fill_rect(world, lx, y, (lx + 2).min(w), y + 1, Stone);
+    // Room partitions, furnishings, stairs, plumbing, and a basement cistern.
+    fill_rect(
+        world,
+        left + 10,
+        attic_floor + 1,
+        left + 11,
+        first_floor,
+        Wood,
+    );
+    fill_rect(
+        world,
+        center + 8,
+        attic_floor + 1,
+        center + 9,
+        first_floor,
+        Wood,
+    );
+    fill_rect(
+        world,
+        left + 4,
+        first_floor - 3,
+        left + 10,
+        first_floor - 1,
+        Wood,
+    );
+    fill_rect(
+        world,
+        center + 3,
+        basement - 4,
+        center + 10,
+        basement - 2,
+        Wood,
+    );
+    for step in 0..7 {
         fill_rect(
             world,
-            rx.saturating_sub(1),
-            y,
-            (rx + 1).min(w),
-            y + 1,
-            Stone,
+            center - 6 + step,
+            first_floor + step,
+            center - 4 + step,
+            first_floor + step + 1,
+            Wood,
         );
     }
-
-    // Rooftop cistern: water stays contained until its floor is damaged.
-    let tank_left = left + 5;
-    fill_rect(world, tank_left, top - 5, tank_left + 9, top - 1, Stone);
-    fill_rect(world, tank_left + 1, top - 4, tank_left + 8, top - 2, Water);
-
-    // Stone fireplace and chimney isolate embers from the wooden floors.
-    let hearth = right - 9;
-    fill_rect(world, hearth, bottom - 6, hearth + 6, bottom, Stone);
-    fill_rect(world, hearth + 1, bottom - 4, hearth + 5, bottom - 1, Empty);
-    fill_rect(world, hearth + 2, bottom - 3, hearth + 4, bottom - 1, Ember);
     fill_rect(
         world,
-        hearth + 2,
-        top.saturating_sub(6),
-        hearth + 4,
-        bottom - 6,
-        Stone,
+        left + 4,
+        basement + 1,
+        left + 13,
+        basement + 2,
+        Metal,
     );
-
-    // Oil boiler in a stone utility room creates a deliberate fire hazard.
-    fill_rect(world, left + 4, bottom - 6, left + 12, bottom, Stone);
-    fill_rect(world, left + 5, bottom - 5, left + 11, bottom - 2, Oil);
-    world.paint(left + 11, bottom - 2, Fire);
-
-    // Upper-story planter reacts with water leaking from the cistern.
-    fill_rect(
-        world,
-        center - 8,
-        top + floor_h - 3,
-        center + 8,
-        top + floor_h - 2,
-        Stone,
-    );
-    fill_rect(
-        world,
-        center - 7,
-        top + floor_h - 5,
-        center + 7,
-        top + floor_h - 3,
-        Plant,
-    );
+    fill_rect(world, left + 4, basement + 1, left + 5, ground - 1, Metal);
+    fill_rect(world, left + 5, basement + 2, left + 12, ground - 1, Water);
+    fill_rect(world, right - 8, basement + 2, right - 4, ground - 1, Oil);
 }
 
-/// Stable stone volcano with lava channels aimed at water and oil basins.
-fn seed_volcano(world: &mut World) {
-    let w = world.width;
-    let h = world.height;
-    if w < 32 || h < 20 {
+/// A reinforced high-rise cut through offices, elevator core, services, and roof tank.
+fn seed_skyscraper(world: &mut World) {
+    let (w, h) = (world.width, world.height);
+    if w < 48 || h < 30 {
         return;
     }
-    let ground = h - 2;
-    let cx = w / 2;
-    let summit = h / 4;
+
+    let ground = h - 3;
+    let left = w / 5;
+    let right = w * 4 / 5;
+    let top = 5;
+    let core_left = w / 2 - 3;
+    let core_right = w / 2 + 3;
+    let floor_height = ((ground - top) / 7).max(3);
+
     fill_rect(world, 0, ground, w, h, Stone);
+    fill_rect(world, left - 2, ground - 5, right + 2, ground, Concrete);
+    fill_rect(world, left, top, left + 2, ground, Concrete);
+    fill_rect(world, right - 2, top, right, ground, Concrete);
+    fill_rect(world, core_left, top, core_left + 2, ground, Concrete);
+    fill_rect(world, core_right - 2, top, core_right, ground, Concrete);
+    fill_rect(
+        world,
+        core_left + 2,
+        top + 2,
+        core_right - 2,
+        ground - 1,
+        Empty,
+    );
 
-    for y in summit..ground {
-        let half = 3 + (y - summit) * (w / 3) / (ground - summit);
-        fill_rect(world, cx - half, y, cx + half + 1, y + 1, Stone);
-        let throat = 1 + (y - summit) / 8;
-        fill_rect(world, cx - throat, y, cx + throat + 1, y + 1, Lava);
-    }
-    fill_rect(world, cx - 4, summit - 1, cx + 5, summit + 2, Lava);
-
-    // Open stone chutes carry lava down both slopes.
-    for step in 0..ground - summit - 2 {
-        let y = summit + 2 + step;
-        let offset = 3 + step * (w / 3 - 4) / (ground - summit - 2);
-        world.paint(cx.saturating_sub(offset), y, Lava);
-        world.paint((cx + offset).min(w - 1), y, Lava);
-    }
-
-    // Left lava makes steam and stone; right lava ignites oil and wood.
-    fill_rect(world, 2, ground - 5, w / 4, ground, Stone);
-    fill_rect(world, 3, ground - 4, w / 4 - 1, ground - 1, Water);
-    fill_rect(world, w * 3 / 4, ground - 5, w - 2, ground, Stone);
-    fill_rect(world, w * 3 / 4 + 1, ground - 4, w - 3, ground - 2, Oil);
-    fill_rect(world, w * 3 / 4 + 2, ground - 7, w - 4, ground - 6, Wood);
-    fill_disc(world, cx as isize, summit as isize - 4, 2, Smoke);
-}
-
-/// Open aquarium that demonstrates density, dissolution, and sediment layers.
-fn seed_aquarium(world: &mut World) {
-    let w = world.width;
-    let h = world.height;
-    if w < 30 || h < 18 {
-        return;
-    }
-    let left = 3;
-    let right = w - 3;
-    let top = h / 5;
-    let bottom = h - 3;
-    fill_rect(world, left, top, left + 1, bottom + 1, Stone);
-    fill_rect(world, right - 1, top, right, bottom + 1, Stone);
-    fill_rect(world, left, bottom, right, bottom + 1, Stone);
-    fill_rect(world, left + 1, top + 2, right - 1, bottom, Water);
-
-    // Sand and heavy mercury settle; oil rises; salt dissolves into the water.
-    for x in left + 1..right - 1 {
-        let depth = 1 + (x * 5 % 3);
-        fill_rect(world, x, bottom - depth, x + 1, bottom, Sand);
-    }
-    for i in 0..5 {
-        fill_disc(
+    for floor in (top + floor_height..ground).step_by(floor_height) {
+        fill_rect(world, left, floor, right, floor + 1, Concrete);
+        fill_rect(world, left + 3, floor - 1, core_left - 2, floor, Wood);
+        fill_rect(world, core_right + 2, floor - 1, right - 3, floor, Wood);
+        fill_rect(
             world,
-            (left + 5 + i * (right - left - 10) / 4) as isize,
-            (bottom - 4 - i % 3) as isize,
-            1,
-            Oil,
+            left + 5,
+            floor - floor_height + 2,
+            left + 6,
+            floor,
+            Wood,
+        );
+        fill_rect(
+            world,
+            right - 6,
+            floor - floor_height + 2,
+            right - 5,
+            floor,
+            Wood,
+        );
+        fill_rect(
+            world,
+            left + 2,
+            floor - floor_height + 3,
+            left + 3,
+            floor - 2,
+            Glass,
+        );
+        fill_rect(
+            world,
+            right - 3,
+            floor - floor_height + 3,
+            right - 2,
+            floor - 2,
+            Glass,
         );
     }
-    fill_rect(world, left + 4, top + 3, left + 8, top + 6, Salt);
-    fill_rect(world, right - 9, top + 3, right - 5, top + 5, Mercury);
 
-    // A stone shelf supports wood; erasing it drops the whole connected chunk.
-    let shelf = w / 2;
-    fill_rect(world, shelf - 6, bottom - 7, shelf + 7, bottom - 6, Stone);
-    fill_rect(world, shelf - 5, bottom - 9, shelf + 6, bottom - 7, Wood);
-    fill_rect(world, shelf - 1, bottom - 12, shelf + 2, bottom - 9, Plant);
-}
-
-/// Foundry with separated fuel, heat, coolant, and reactive feed hoppers.
-fn seed_foundry(world: &mut World) {
-    let w = world.width;
-    let h = world.height;
-    if w < 36 || h < 22 {
-        return;
-    }
-    let ground = h - 2;
-    let third = w / 3;
-    fill_rect(world, 0, ground, w, h, Stone);
-
-    // Three stone bays prevent every reaction from firing at once.
-    for x in [1, third, third * 2, w - 2] {
-        fill_rect(world, x, ground - 12, x + 1, ground, Stone);
-    }
-    fill_rect(world, 2, ground - 5, third, ground, Lava);
-    fill_rect(world, third + 1, ground - 5, third * 2, ground, Water);
-    fill_rect(world, third * 2 + 1, ground - 5, w - 2, ground, Oil);
-
-    // Powder hoppers fall into each bay when their wooden plugs burn.
-    let hopper_y = ground - 11;
-    fill_rect(world, 3, hopper_y, third - 2, hopper_y + 3, Sand);
+    // Metal elevator car and service risers show the building's vertical systems.
     fill_rect(
         world,
-        third + 3,
-        hopper_y,
-        third * 2 - 2,
-        hopper_y + 3,
-        Salt,
+        core_left + 2,
+        ground - floor_height - 2,
+        core_right - 2,
+        ground - floor_height + 2,
+        Metal,
     );
-    fill_rect(
-        world,
-        third * 2 + 3,
-        hopper_y,
-        w - 4,
-        hopper_y + 3,
-        Gunpowder,
-    );
-    for (l, r) in [(2, third), (third + 1, third * 2), (third * 2 + 1, w - 2)] {
-        fill_rect(world, l, hopper_y + 3, r, hopper_y + 4, Wood);
-    }
+    fill_rect(world, right - 7, top + 2, right - 6, ground - 2, Metal);
+    fill_rect(world, right - 6, top + 2, right - 5, ground - 2, Water);
+    fill_rect(world, left + 4, ground - 4, core_left - 2, ground - 2, Oil);
 
-    // A central furnace can breach both the water and oil bays.
-    fill_rect(world, third - 1, ground - 9, third + 2, ground - 5, Stone);
-    fill_rect(world, third, ground - 8, third + 1, ground - 5, Fire);
-    fill_rect(
-        world,
-        third * 2 - 1,
-        ground - 9,
-        third * 2 + 2,
-        ground - 5,
-        Stone,
-    );
-    fill_rect(
-        world,
-        third * 2,
-        ground - 8,
-        third * 2 + 1,
-        ground - 5,
-        Ember,
-    );
-}
-
-/// Watershed map with rain, porous sand, plant beds, and an oil spill.
-fn seed_rainstorm(world: &mut World) {
-    let w = world.width;
-    let h = world.height;
-    if w < 36 || h < 22 {
-        return;
-    }
-    let ground = h - 2;
-    fill_rect(world, 0, ground, w, h, Stone);
-
-    // Sloped sand terrain drains into two stone-lined catch basins.
-    for x in 0..w {
-        let depth = 2 + x.abs_diff(w / 2) * 5 / w;
-        fill_rect(world, x, ground - depth, x + 1, ground, Sand);
-    }
-    for &(l, r) in &[(2, w / 4), (w * 3 / 4, w - 2)] {
-        fill_rect(world, l, ground - 7, l + 1, ground, Stone);
-        fill_rect(world, r - 1, ground - 7, r, ground, Stone);
-        fill_rect(world, l, ground - 1, r, ground, Stone);
-    }
-
-    // Water clouds immediately rain; steam pockets rise through them.
-    for i in 0..4 {
-        let cx = w * (i + 1) / 5;
-        fill_disc(world, cx as isize, 4 + (i % 2) as isize, 3, Water);
-        fill_disc(world, cx as isize + 3, 6, 1, Steam);
-    }
-
-    // Plants consume nearby water while an oil spill floats on the right basin.
-    fill_rect(world, 3, ground - 9, w / 4 - 1, ground - 7, Plant);
-    fill_rect(world, w * 3 / 4 + 1, ground - 6, w - 4, ground - 4, Oil);
-    fill_rect(world, w * 3 / 4 + 3, ground - 9, w - 6, ground - 8, Wood);
-    world.paint(w - 7, ground - 10, Fire);
+    // Roof tank sits above the concrete core, with a visible steel enclosure.
+    let tank_left = core_left - 5;
+    let tank_right = core_right + 5;
+    fill_rect(world, tank_left, 0, tank_right, 1, Metal);
+    fill_rect(world, tank_left, 0, tank_left + 1, top + 2, Metal);
+    fill_rect(world, tank_right - 1, 0, tank_right, top + 2, Metal);
+    fill_rect(world, tank_left + 1, 1, tank_right - 1, top + 1, Water);
+    fill_rect(world, tank_left, top + 1, tank_right, top + 2, Metal);
 }
