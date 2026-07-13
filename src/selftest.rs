@@ -1102,6 +1102,139 @@ fn c4_blast_respects_structural_materials() -> Result<(), String> {
     Ok(())
 }
 
+
+fn ice_melt_preserves_cold_water() -> Result<(), String> {
+    let mut w = World::new(5, 5);
+    // Hot metal conducts into ice without an open flame consuming the cell.
+    w.paint(2, 1, Metal);
+    w.paint_state(2, 1, (Metal, 0, 0, 400));
+    w.paint(2, 2, Ice);
+    for _ in 0..80 {
+        w.step();
+        if w.get(2, 2) == Water {
+            let t = w.temp_at(2, 2);
+            if t > 15 {
+                return Err(format!(
+                    "melted water snapped warm (temp={t}, expected near freezing)"
+                ));
+            }
+            return Ok(());
+        }
+        // Keep the metal hot while heat soaks.
+        if w.get(2, 1) == Metal {
+            w.paint_state(2, 1, (Metal, 0, w.seed_at(2, 1), 400));
+        }
+    }
+    Err(format!(
+        "ice did not melt (cell={}, temp={})",
+        w.get(2, 2).name(),
+        w.temp_at(2, 2)
+    ))
+}
+
+fn water_boils_above_100() -> Result<(), String> {
+    let mut w = World::new(5, 5);
+    // Basin so the droplet cannot fall away while we reassert stored heat.
+    for x in 1..4 {
+        w.paint(x, 3, Stone);
+    }
+    w.paint(1, 2, Stone);
+    w.paint(3, 2, Stone);
+    // No fire/lava contact — only stored heat.
+    w.paint(2, 2, Water);
+    w.paint_state(2, 2, (Water, 0, 0, 140));
+    for _ in 0..40 {
+        // Re-assert heat each tick so ambient bleed cannot cancel the test.
+        if w.get(2, 2) == Water {
+            w.paint_state(2, 2, (Water, 0, w.seed_at(2, 2), 140));
+        }
+        w.step();
+        if count(&w, Steam) > 0 || w.get(2, 2) == Steam {
+            return Ok(());
+        }
+    }
+    Err(format!(
+        "hot water did not boil (cell={}, temp={})",
+        w.get(2, 2).name(),
+        w.temp_at(2, 2)
+    ))
+}
+
+fn hot_glass_shatters_in_cold_water() -> Result<(), String> {
+    let mut w = World::new(5, 5);
+    w.paint(2, 2, Glass);
+    w.paint_state(2, 2, (Glass, 0, 0, 600));
+    w.paint(2, 3, Water);
+    w.step();
+    if w.get(2, 2) != Sand {
+        return Err(format!(
+            "hot glass did not shatter (got {}, temp={})",
+            w.get(2, 2).name(),
+            w.temp_at(2, 2)
+        ));
+    }
+    Ok(())
+}
+
+fn sealed_fire_suffocates() -> Result<(), String> {
+    // Open air: flame still present after a short run.
+    let mut open = World::new(5, 5);
+    open.paint(2, 2, Fire);
+    for _ in 0..8 {
+        open.step();
+    }
+    if count(&open, Fire) == 0 {
+        return Err("open fire died too quickly to compare against sealed fire".into());
+    }
+
+    // Fully boxed: every neighbour is solid stone, so the flame has no air.
+    let mut sealed = World::new(5, 5);
+    for y in 0..5 {
+        for x in 0..5 {
+            sealed.paint(x, y, Stone);
+        }
+    }
+    sealed.paint(2, 2, Fire);
+    for _ in 0..8 {
+        sealed.step();
+    }
+    if count(&sealed, Fire) > 0 {
+        return Err("sealed fire did not suffocate".into());
+    }
+    Ok(())
+}
+
+fn blast_moves_sand_outward() -> Result<(), String> {
+    let mut w = World::new(21, 11);
+    let (cx, cy) = (5, 5);
+    // Floor so sand does not just fall away from the measurement.
+    for x in 0..21 {
+        w.paint(x, 10, Stone);
+    }
+    // Sand column just outside the charge, with empty room further out.
+    for x in 7..11 {
+        w.paint(x, cy, Sand);
+    }
+    let max_before = (0..w.width)
+        .filter(|&x| w.get(x, cy) == Sand)
+        .max()
+        .unwrap_or(0);
+    w.paint(cx, cy, Gunpowder);
+    w.paint(cx, cy - 1, Fire);
+    w.step();
+
+    let max_after = (0..w.width)
+        .filter(|&x| (0..w.height).any(|y| w.get(x, y) == Sand))
+        .max()
+        .unwrap_or(0);
+    if max_after <= max_before {
+        return Err(format!(
+            "blast did not fling sand outward (max x before={max_before}, after={max_after})"
+        ));
+    }
+    Ok(())
+}
+
 fn preset_scenes_load_and_run() -> Result<(), String> {
     for scene in Scene::ALL {
         let mut world = World::new(80, 40);
@@ -1210,6 +1343,14 @@ pub fn run() -> std::io::Result<()> {
         ),
         ("renders_picker", renders_picker),
         ("renders_grid_colors", renders_grid_colors),
+        ("ice_melt_preserves_cold_water", ice_melt_preserves_cold_water),
+        ("water_boils_above_100", water_boils_above_100),
+        (
+            "hot_glass_shatters_in_cold_water",
+            hot_glass_shatters_in_cold_water,
+        ),
+        ("sealed_fire_suffocates", sealed_fire_suffocates),
+        ("blast_moves_sand_outward", blast_moves_sand_outward),
         ("preset_scenes_load_and_run", preset_scenes_load_and_run),
     ];
 

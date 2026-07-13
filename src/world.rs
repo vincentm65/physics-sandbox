@@ -346,10 +346,14 @@ impl World {
     }
 
     fn put(&mut self, i: usize, m: Material, life: u16) {
+        let prev_temp = self.temp[i];
         self.grid[i] = m;
         self.life[i] = life;
         self.seed[i] = rand::random();
-        self.temp[i] = m.painted_temperature();
+        // Heat sources clamp; everything else keeps the cell's thermal history so
+        // phase changes (ice→water, lava→stone) stay continuous instead of
+        // snapping back to ambient.
+        self.temp[i] = m.heat_source_temp().unwrap_or(prev_temp);
         self.moved_tick[i] = self.tick;
         self.activate_idx(i);
     }
@@ -838,11 +842,25 @@ impl World {
         let i = self.idx(x, y);
         let mut t = self.temp[i];
         for n in self.n8(x, y).into_iter().flatten() {
-            if let Some(src) = self.grid[self.idx(n.0, n.1)].heat_source_temp() {
+            let ni = self.idx(n.0, n.1);
+            let m = self.grid[ni];
+            if let Some(src) = m.heat_source_temp() {
                 if src > t {
                     t = src;
                 } else if src < t {
                     t = t.min(src + (t - src) / 2);
+                }
+            } else if !m.is_empty() && !m.is_gas() {
+                // Conductive contact with solids/liquids/powders: feel their
+                // stored heat immediately (hot metal melts ice, boils water).
+                // Only hotter bodies raise felt temp — ambient-temperature stone
+                // must not suppress boiling of already-hot water.
+                let nt = self.temp[ni];
+                if nt > t {
+                    t = nt;
+                } else if nt < 0 && nt < t {
+                    // Sub-zero bodies (chilled metal, etc.) still cool on contact.
+                    t = t.min(nt + (t - nt) / 2);
                 }
             }
         }
@@ -851,33 +869,107 @@ impl World {
 
     fn explode(&mut self, x: usize, y: usize, radius: i32) {
         let r2 = radius * radius;
+        let mut cells: Vec<(i32, i32, i32, usize, usize)> = Vec::new();
         for dy in -radius..=radius {
             for dx in -radius..=radius {
-                if dx * dx + dy * dy > r2 {
+                let dist2 = dx * dx + dy * dy;
+                if dist2 > r2 {
                     continue;
                 }
                 let Some((tx, ty)) = self.adj(x, y, dx, dy) else {
                     continue;
                 };
-                let i = self.idx(tx, ty);
-                let material = self.grid[i];
-                if material.blast_resistant() {
-                    continue;
-                }
-                if let Some(shard) = material.blast_shatter_product() {
-                    self.put(i, shard, 0);
-                    continue;
-                }
-                let roll = self.roll(tx, ty, 0x92);
-                if roll < 650 {
-                    self.put(i, Fire, rand_range(FIRE_LIFE_MIN, FIRE_LIFE_MAX));
-                } else if roll < 900 {
-                    self.put(i, Smoke, rand_range(SMOKE_LIFE_MIN / 2, SMOKE_LIFE_MAX / 2));
-                } else {
-                    self.put(i, Empty, 0);
-                }
+                cells.push((dist2, dx, dy, tx, ty));
             }
         }
+        // Outside-in so flung grains find space cleared by outer destruction.
+        cells.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+
+        for &(dist2, dx, dy, tx, ty) in &cells {
+            let i = self.idx(tx, ty);
+            let material = self.grid[i];
+            if material.blast_resistant() {
+                continue;
+            }
+            if let Some(shard) = material.blast_shatter_product() {
+                self.put(i, shard, 0);
+                continue;
+            }
+
+            // Fling loose powders/fluids outward before deciding destruction.
+            if material.is_fluid() && dist2 > 0 && self.fling_outward(tx, ty, dx, dy) {
+                continue;
+            }
+
+            let roll = self.roll(tx, ty, 0x92);
+            if roll < 550 {
+                self.put(i, Fire, rand_range(FIRE_LIFE_MIN, FIRE_LIFE_MAX));
+            } else if roll < 800 {
+                self.put(i, Smoke, rand_range(SMOKE_LIFE_MIN / 2, SMOKE_LIFE_MAX / 2));
+            } else if roll < 920
+                && matches!(
+                    material,
+                    Stone | Wood | Concrete | Plant | Ice | Glass | Coal | Ash
+                )
+            {
+                // Outer rubble instead of pure vaporization.
+                self.put(i, Sand, 0);
+            } else {
+                self.put(i, Empty, 0);
+            }
+        }
+    }
+
+    /// Push the cell at `(x, y)` further from the blast origin along `(dx, dy)`.
+    /// Returns true when the grain left its original cell.
+    fn fling_outward(&mut self, x: usize, y: usize, dx: i32, dy: i32) -> bool {
+        let sx = dx.signum();
+        let sy = dy.signum();
+        let i = self.idx(x, y);
+        let material = self.grid[i];
+        let life = self.life[i];
+        let seed = self.seed[i];
+        let temp = self.temp[i];
+
+        // Prefer longer throws, then cardinal fallbacks when the diagonal is blocked.
+        let candidates = [
+            (sx * 2, sy * 2),
+            (sx, sy),
+            (sx * 2, 0),
+            (0, sy * 2),
+            (sx, 0),
+            (0, sy),
+        ];
+        for idx in 0..candidates.len() {
+            let (px, py) = candidates[idx];
+            if px == 0 && py == 0 {
+                continue;
+            }
+            if candidates[..idx].contains(&(px, py)) {
+                continue;
+            }
+            let Some((lx, ly)) = self.adj(x, y, px, py) else {
+                continue;
+            };
+            let li = self.idx(lx, ly);
+            if !(self.grid[li].is_empty() || self.grid[li].is_gas()) {
+                continue;
+            }
+            self.grid[i] = Empty;
+            self.life[i] = 0;
+            self.temp[i] = AMBIENT_TEMP;
+            self.moved_tick[i] = self.tick;
+            self.activate_idx(i);
+
+            self.grid[li] = material;
+            self.life[li] = life;
+            self.seed[li] = seed;
+            self.temp[li] = temp;
+            self.moved_tick[li] = self.tick;
+            self.activate_idx(li);
+            return true;
+        }
+        false
     }
 
     fn step_combustible(&mut self, x: usize, y: usize) -> bool {
@@ -1186,6 +1278,17 @@ impl World {
         }
         self.life[i] = life;
 
+        // No oxygen: a flame fully boxed in by solids smothers into smoke.
+        // Embers still smoulder without free air; only open flame is gated.
+        if !self.has_combustion_air(x, y) {
+            self.put(
+                i,
+                Smoke,
+                rand_range(SMOKE_LIFE_MIN / 2, SMOKE_LIFE_MAX / 2),
+            );
+            return;
+        }
+
         // Oil/napalm fires shrug off water: water boils away, flame keeps burning.
         let oily = self
             .n8(x, y)
@@ -1244,6 +1347,15 @@ impl World {
             return;
         }
         let _ = self.try_step(x, y, d2, 0, passable);
+    }
+
+    /// Free air a flame can breathe: empty space, gaseous exhaust, or fuel it
+    /// is actively consuming. Fully boxed by inert solids smothers to smoke.
+    fn has_combustion_air(&self, x: usize, y: usize) -> bool {
+        self.n8(x, y).into_iter().flatten().any(|(nx, ny)| {
+            let m = self.grid[self.idx(nx, ny)];
+            matches!(m, Empty | Smoke | Steam | Fire) || m.flammable()
+        })
     }
 
     /// Only `ASH_CHANCE` of cooled embers leave a residue of ash; the rest burn
@@ -1337,6 +1449,10 @@ impl World {
                     self.put(ni, if self.grid[ni] == Lava { Stone } else { Smoke }, 0);
                     self.put(i, Steam, rand_range(STEAM_LIFE_MIN, STEAM_LIFE_MAX));
                     return true;
+                }
+                // Hot glass meets cryogenic quench → shatter.
+                Glass if self.temp[ni] >= 200 => {
+                    self.put(ni, Sand, 0);
                 }
                 _ => {}
             }
@@ -1461,11 +1577,15 @@ impl World {
         let i = self.idx(x, y);
 
         // Temperature-driven melt (contact heat soaks into temp / effective_temp).
+        // effective_temp already includes hot solids/liquids via stored temp.
         let heat = self.effective_temp(x, y);
         if heat > 0 {
             let chance = ((heat as u32).min(400) / 2).max(50);
             if self.chance(x, y, 0xB0, chance) {
+                // Near-freezing meltwater, not ambient — preserves cold continuity
+                // without immediately re-freezing from the ice heat-source temp.
                 self.put(i, Water, 0);
+                self.temp[i] = 0;
                 return;
             }
         }
@@ -1479,6 +1599,18 @@ impl World {
         if self.effective_temp(x, y) < 0 && self.chance(x, y, 0x81, 200) {
             self.put(i, Ice, 0);
             return true;
+        }
+        // Temperature-driven boil: heat soak is enough; contact with fire/lava
+        // is no longer required (those paths still help via effective_temp).
+        let heat = self.effective_temp(x, y);
+        if heat >= 100 {
+            // Base chance is high enough that sustained boiling-point water
+            // converts within a few dozen ticks even after ambient bleed.
+            let chance = (((heat as u32) - 100).min(500) / 2 + 150).min(600);
+            if self.chance(x, y, 0x83, chance) {
+                self.put(i, Steam, rand_range(STEAM_LIFE_MIN, STEAM_LIFE_MAX));
+                return true;
+            }
         }
         for n in self.n4(x, y) {
             let Some((nx, ny)) = n else {
@@ -1503,6 +1635,10 @@ impl World {
                     // water side of lava+water: boil; lava solidifies when it steps
                     self.put(i, Steam, rand_range(STEAM_LIFE_MIN, STEAM_LIFE_MAX));
                     return true;
+                }
+                // Hot glass quenched by cold water shatters (thermal shock).
+                Glass if self.temp[ni] >= 300 => {
+                    self.put(ni, Sand, 0);
                 }
                 _ => {}
             }
