@@ -12,6 +12,7 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 mod app;
 mod blueprint;
 mod material;
+mod raster;
 mod scene_manager;
 mod selftest;
 mod ui;

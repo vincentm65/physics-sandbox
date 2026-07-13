@@ -50,23 +50,26 @@ fn fast_fall_is_bounded_and_cannot_tunnel() -> Result<(), String> {
         return Err("sand did not use its two-cell fall speed".into());
     }
 
+    // Metal is a fixed solid (stone would fall as an unsupported structural chunk).
     let mut blocked = World::new(7, 8);
     for x in 0..7 {
-        blocked.paint(x, 2, Stone);
+        blocked.paint(x, 2, Metal);
     }
     blocked.paint(3, 1, Sand);
     blocked.step();
-    if blocked.get(3, 1) != Sand || blocked.get(3, 2) != Stone {
+    if blocked.get(3, 1) != Sand || blocked.get(3, 2) != Metal {
         return Err("fast fall passed through a one-cell barrier".into());
     }
     Ok(())
 }
 
+
 fn water_prefers_route_to_lower_space() -> Result<(), String> {
     let mut w = World::new(11, 7);
+    // Fixed platform: unsupported stone would collapse before water routes.
     for x in 0..11 {
         if x != 8 {
-            w.paint(x, 4, Stone);
+            w.paint(x, 4, Metal);
         }
     }
     w.paint(5, 3, Water);
@@ -77,13 +80,15 @@ fn water_prefers_route_to_lower_space() -> Result<(), String> {
     Ok(())
 }
 
+
 fn wall_is_immovable() -> Result<(), String> {
     let mut w = World::new(8, 8);
-    w.paint(3, 3, Stone);
+    // Metal stays put; unsupported stone is a falling structural chunk.
+    w.paint(3, 3, Metal);
     for _ in 0..20 {
         w.step();
     }
-    if w.get(3, 3) != Stone {
+    if w.get(3, 3) != Metal {
         return Err("wall moved".into());
     }
     Ok(())
@@ -184,6 +189,46 @@ fn wood_chunk_falls_together() -> Result<(), String> {
                 return Err("wood chunk did not fall as a glued 2x2 block".into());
             }
         }
+    }
+    Ok(())
+}
+
+fn structural_chunks_fall_together() -> Result<(), String> {
+    for material in [Stone, Glass] {
+        let mut w = World::new(12, 12);
+        floor(&mut w);
+        for y in 1..3 {
+            for x in 5..7 {
+                w.paint(x, y, material);
+            }
+        }
+        for _ in 0..4 {
+            w.step();
+        }
+        for y in 5..7 {
+            for x in 5..7 {
+                if w.get(x, y) != material {
+                    return Err(format!("{} chunk did not fall together", material.name()));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn falling_glass_shatters_on_impact() -> Result<(), String> {
+    let mut w = World::new(9, 9);
+    floor(&mut w);
+    w.paint(4, 2, Glass);
+    for _ in 0..7 {
+        w.step();
+    }
+    if w.get(4, 7) != BrokenGlass {
+
+        return Err(format!(
+            "falling glass did not shatter (got {})",
+            w.get(4, 7).name()
+        ));
     }
     Ok(())
 }
@@ -863,19 +908,63 @@ fn fuse_burns_progressively() -> Result<(), String> {
     Ok(())
 }
 
+fn fuse_lit_firework_launches_and_bursts() -> Result<(), String> {
+    let mut w = World::new(35, 45);
+    // A burning fuse lights the rocket; its seeded timer controls the height.
+    w.paint(14, 35, Fire);
+    w.paint(15, 35, Fuse);
+    w.paint(16, 35, Firework);
+
+    let mut launched = false;
+    let mut burst = false;
+    for _ in 0..80 {
+        w.step();
+        launched |= min_y(&w, Firework).is_some_and(|y| y < 35);
+        burst |= count(&w, FireworkSpark) > 0;
+    }
+    if !launched {
+        return Err("fuse-lit firework did not launch".into());
+    }
+    if !burst {
+        return Err("launched firework did not produce a spark burst".into());
+    }
+    Ok(())
+}
+
 fn structural_materials_need_sustained_high_heat() -> Result<(), String> {
     for material in [Glass, Stone, Concrete] {
         let (_, delay, product) = material.melt().ok_or("missing melt profile")?;
 
-        let mut ordinary_fire = World::new(3, 3);
-        ordinary_fire.paint(1, 1, material);
-        for x in 0..3 {
-            for y in 0..3 {
-                if (x, y) != (1, 1) {
-                    ordinary_fire.paint(x, y, Fire);
+        // Metal orthogonally cages the sample so it cannot fall, and heat sits only
+        // on the diagonals. effective_temp still sees diagonal lava (n8), but
+        // react_lava only touches n4 — so Sand/BrokenGlass melt products are not
+        // absorbed on the melt tick.
+        //   H M H
+        //   M X M
+        //   H M H
+        let build = |heat: Material| {
+            let mut w = World::new(3, 3);
+            for x in 0..3 {
+                for y in 0..3 {
+                    let diag = x != 1 && y != 1;
+                    let center = x == 1 && y == 1;
+                    w.paint(
+                        x,
+                        y,
+                        if center {
+                            material
+                        } else if diag {
+                            heat
+                        } else {
+                            Metal
+                        },
+                    );
                 }
             }
-        }
+            w
+        };
+
+        let mut ordinary_fire = build(Fire);
         for _ in 0..delay + 10 {
             ordinary_fire.step();
         }
@@ -883,15 +972,7 @@ fn structural_materials_need_sustained_high_heat() -> Result<(), String> {
             return Err(format!("{} melted from ordinary fire", material.name()));
         }
 
-        let mut high_heat = World::new(3, 3);
-        high_heat.paint(1, 1, material);
-        for x in 0..3 {
-            for y in 0..3 {
-                if (x, y) != (1, 1) {
-                    high_heat.paint(x, y, Lava);
-                }
-            }
-        }
+        let mut high_heat = build(Lava);
         for _ in 0..delay - 1 {
             high_heat.step();
         }
@@ -1085,6 +1166,10 @@ fn liquid_nitrogen_freezes_and_extinguishes() -> Result<(), String> {
 fn c4_blast_respects_structural_materials() -> Result<(), String> {
     let mut w = World::new(31, 31);
     let (cx, cy) = (15, 15);
+    // Shelf so stone/glass don't freefall before the blast resolves.
+    for x in (cx + 6)..=(cx + 10) {
+        w.paint(x, cy + 1, Metal);
+    }
     w.paint(cx + 10, cy, Stone);
     w.paint(cx + 8, cy, Glass);
     w.paint(cx + 7, cy, Metal);
@@ -1093,7 +1178,7 @@ fn c4_blast_respects_structural_materials() -> Result<(), String> {
     w.paint(cx, cy - 1, Fire);
     w.step();
 
-    if w.get(cx + 10, cy) == Stone || w.get(cx + 8, cy) != Sand {
+    if w.get(cx + 10, cy) == Stone || w.get(cx + 8, cy) != BrokenGlass {
         return Err("C4 did not damage stone and shatter glass".into());
     }
     if w.get(cx + 7, cy) != Metal || w.get(cx + 6, cy) != Concrete {
@@ -1134,12 +1219,12 @@ fn ice_melt_preserves_cold_water() -> Result<(), String> {
 
 fn water_boils_above_100() -> Result<(), String> {
     let mut w = World::new(5, 5);
-    // Basin so the droplet cannot fall away while we reassert stored heat.
+    // Fixed metal basin so unsupported stone walls cannot collapse under the droplet.
     for x in 1..4 {
-        w.paint(x, 3, Stone);
+        w.paint(x, 3, Metal);
     }
-    w.paint(1, 2, Stone);
-    w.paint(3, 2, Stone);
+    w.paint(1, 2, Metal);
+    w.paint(3, 2, Metal);
     // No fire/lava contact — only stored heat.
     w.paint(2, 2, Water);
     w.paint_state(2, 2, (Water, 0, 0, 140));
@@ -1162,18 +1247,26 @@ fn water_boils_above_100() -> Result<(), String> {
 
 fn hot_glass_shatters_in_cold_water() -> Result<(), String> {
     let mut w = World::new(5, 5);
+    // Support glass from below; keep water beside it (not under — glass falls into fluids).
+    w.paint(2, 3, Metal);
+    w.paint(3, 3, Metal);
     w.paint(2, 2, Glass);
     w.paint_state(2, 2, (Glass, 0, 0, 600));
-    w.paint(2, 3, Water);
-    w.step();
-    if w.get(2, 2) != Sand {
-        return Err(format!(
-            "hot glass did not shatter (got {}, temp={})",
-            w.get(2, 2).name(),
-            w.temp_at(2, 2)
-        ));
+    w.paint(3, 2, Water);
+    for _ in 0..10 {
+        if w.get(2, 2) == Glass {
+            w.paint_state(2, 2, (Glass, 0, 0, 600));
+        }
+        w.step();
+        if w.get(2, 2) == BrokenGlass {
+            return Ok(());
+        }
     }
-    Ok(())
+    Err(format!(
+        "hot glass did not shatter (got {}, temp={})",
+        w.get(2, 2).name(),
+        w.temp_at(2, 2)
+    ))
 }
 
 fn sealed_fire_suffocates() -> Result<(), String> {
@@ -1266,6 +1359,14 @@ pub fn run() -> std::io::Result<()> {
         ("oil_floats", oil_floats),
         ("wood_chunk_falls_together", wood_chunk_falls_together),
         (
+            "structural_chunks_fall_together",
+            structural_chunks_fall_together,
+        ),
+        (
+            "falling_glass_shatters_on_impact",
+            falling_glass_shatters_on_impact,
+        ),
+        (
             "wood_chunk_sinks_through_water",
             wood_chunk_sinks_through_water,
         ),
@@ -1300,6 +1401,10 @@ pub fn run() -> std::io::Result<()> {
         ),
         ("tnt_has_a_large_blast_radius", tnt_has_a_large_blast_radius),
         ("new_fuels_ignite", new_fuels_ignite),
+        (
+            "fuse_lit_firework_launches_and_bursts",
+            fuse_lit_firework_launches_and_bursts,
+        ),
         ("fuse_burns_progressively", fuse_burns_progressively),
         (
             "structural_materials_need_sustained_high_heat",
@@ -1343,7 +1448,10 @@ pub fn run() -> std::io::Result<()> {
         ),
         ("renders_picker", renders_picker),
         ("renders_grid_colors", renders_grid_colors),
-        ("ice_melt_preserves_cold_water", ice_melt_preserves_cold_water),
+        (
+            "ice_melt_preserves_cold_water",
+            ice_melt_preserves_cold_water,
+        ),
         ("water_boils_above_100", water_boils_above_100),
         (
             "hot_glass_shatters_in_cold_water",

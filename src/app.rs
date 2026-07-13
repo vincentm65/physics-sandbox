@@ -3,6 +3,7 @@ use crossterm::event::{
 };
 
 use crate::material::Material;
+use crate::raster;
 use crate::scene_manager;
 use crate::ui;
 use crate::world::{Scene, World};
@@ -374,15 +375,11 @@ impl App {
         }
         let n = self.scene_menu.scenes.len();
         match k.code {
-            KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('w') => {
-                if n > 0 {
-                    self.scene_menu.cursor = (self.scene_menu.cursor + n - 1) % n;
-                }
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('w') if n > 0 => {
+                self.scene_menu.cursor = (self.scene_menu.cursor + n - 1) % n;
             }
-            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('s') => {
-                if n > 0 {
-                    self.scene_menu.cursor = (self.scene_menu.cursor + 1) % n;
-                }
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('s') if n > 0 => {
+                self.scene_menu.cursor = (self.scene_menu.cursor + 1) % n;
             }
             KeyCode::Char('l') | KeyCode::Enter => {
                 if let Some(state) = self.scene_menu.load_selected() {
@@ -421,12 +418,11 @@ impl App {
             KeyCode::Backspace => {
                 self.scene_menu.save_name.pop();
             }
-            KeyCode::Char(c) => {
+            KeyCode::Char(c)
                 // Allow alphanumeric, space, underscore, hyphen
-                if c.is_alphanumeric() || c == ' ' || c == '_' || c == '-' {
+                if (c.is_alphanumeric() || c == ' ' || c == '_' || c == '-') => {
                     self.scene_menu.save_name.push(c);
                 }
-            }
             _ => {}
         }
         true
@@ -781,14 +777,8 @@ fn paint_cell(world: &mut World, x: i32, y: i32, material: Material, mirror: Opt
         return;
     }
     world.paint(x as usize, y as usize, material);
-    if let Some(axis) = mirror {
-        let (mx, my) = match axis {
-            MirrorAxis::Horizontal => (world.width as i32 - 1 - x, y),
-            MirrorAxis::Vertical => (x, world.height as i32 - 1 - y),
-        };
-        if mx >= 0 && my >= 0 {
-            world.paint(mx as usize, my as usize, material);
-        }
+    if let Some((mx, my)) = mirror_point(world, x, y, mirror) {
+        world.paint(mx, my, material);
     }
 }
 
@@ -803,56 +793,35 @@ fn paint_state(
         return;
     }
     world.paint_state(x as usize, y as usize, state);
-    if let Some(axis) = mirror {
-        let (mx, my) = match axis {
-            MirrorAxis::Horizontal => (world.width as i32 - 1 - x, y),
-            MirrorAxis::Vertical => (x, world.height as i32 - 1 - y),
-        };
-        if mx >= 0 && my >= 0 {
-            world.paint_state(mx as usize, my as usize, state);
-        }
+    if let Some((mx, my)) = mirror_point(world, x, y, mirror) {
+        world.paint_state(mx, my, state);
     }
 }
 
-/// Sampled line between two points so a fast drag leaves no gaps.
+fn mirror_point(
+    world: &World,
+    x: i32,
+    y: i32,
+    mirror: Option<MirrorAxis>,
+) -> Option<(usize, usize)> {
+    let (mx, my) = match mirror? {
+        MirrorAxis::Horizontal => (world.width as i32 - 1 - x, y),
+        MirrorAxis::Vertical => (x, world.height as i32 - 1 - y),
+    };
+    (mx >= 0 && my >= 0).then_some((mx as usize, my as usize))
+}
+
+/// Whether a point is covered by an endpoint-inclusive rasterized line.
 fn line_contains(start: (i32, i32), end: (i32, i32), thickness: usize, px: i32, py: i32) -> bool {
-    let (mut x, mut y) = start;
-    let dx = (end.0 - x).abs();
-    let sx = if x < end.0 { 1 } else { -1 };
-    let dy = -(end.1 - y).abs();
-    let sy = if y < end.1 { 1 } else { -1 };
-    let mut err = dx + dy;
-    loop {
-        let half = thickness as i32 / 2;
-        if (x - half..x - half + thickness as i32).contains(&px)
+    let half = thickness as i32 / 2;
+    raster::line_points(start, end).into_iter().any(|(x, y)| {
+        (x - half..x - half + thickness as i32).contains(&px)
             && (y - half..y - half + thickness as i32).contains(&py)
-        {
-            return true;
-        }
-        if (x, y) == end {
-            return false;
-        }
-        let e2 = err * 2;
-        if e2 >= dy {
-            err += dy;
-            x += sx;
-        }
-        if e2 <= dx {
-            err += dx;
-            y += sy;
-        }
-    }
+    })
 }
 
 fn for_line_points(x0: i32, y0: i32, x1: i32, y1: i32, mut f: impl FnMut(i32, i32)) {
-    let dx = x1 - x0;
-    let dy = y1 - y0;
-    let steps = dx.unsigned_abs().max(dy.unsigned_abs()).max(1);
-    for i in 0..=steps {
-        let t = i as f32 / steps as f32;
-        f(
-            (x0 as f32 + dx as f32 * t).round() as i32,
-            (y0 as f32 + dy as f32 * t).round() as i32,
-        );
+    for (x, y) in raster::line_points((x0, y0), (x1, y1)) {
+        f(x, y);
     }
 }

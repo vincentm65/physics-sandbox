@@ -5,6 +5,7 @@ use std::path::Path;
 use serde::Deserialize;
 
 use crate::material::Material;
+use crate::raster;
 use crate::scene_manager::SceneState;
 use crate::world::World;
 
@@ -369,7 +370,11 @@ fn validate_operations(
                 if !contents.is_liquid()
                     && !matches!(
                         contents,
-                        Material::Sand | Material::Salt | Material::Gunpowder | Material::Coal
+                        Material::Sand
+                            | Material::BrokenGlass
+                            | Material::Salt
+                            | Material::Gunpowder
+                            | Material::Coal
                     ) =>
             {
                 warnings.push(format!("{at}: contents is not a liquid or powder"))
@@ -623,7 +628,7 @@ pub(crate) fn line(
     thickness: usize,
     material: Material,
 ) {
-    for [x, y] in bresenham(from, to) {
+    for (x, y) in raster::line_points((from[0], from[1]), (to[0], to[1])) {
         rect(
             world,
             x - thickness as i32 / 2,
@@ -711,7 +716,11 @@ fn tank(
 fn terrain(world: &mut World, points: &[[i32; 2]], depth: usize, material: Material) {
     let mut seen: Vec<[i32; 2]> = Vec::new();
     for i in 0..points.len().saturating_sub(1) {
-        for p in bresenham(points[i], points[i + 1]) {
+        for (x, y) in raster::line_points(
+            (points[i][0], points[i][1]),
+            (points[i + 1][0], points[i + 1][1]),
+        ) {
+            let p = [x, y];
             if !seen.contains(&p) {
                 seen.push(p);
             }
@@ -722,33 +731,6 @@ fn terrain(world: &mut World, points: &[[i32; 2]], depth: usize, material: Mater
             paint(world, *px, *py + d as i32, material);
         }
     }
-}
-
-/// Bresenham line integer points (endpoint-inclusive).
-fn bresenham(from: [i32; 2], to: [i32; 2]) -> Vec<[i32; 2]> {
-    let mut pts = Vec::new();
-    let (mut x, mut y) = (from[0], from[1]);
-    let dx = (to[0] - from[0]).abs();
-    let sx = if from[0] < to[0] { 1 } else { -1 };
-    let dy = -(to[1] - from[1]).abs();
-    let sy = if from[1] < to[1] { 1 } else { -1 };
-    let mut err = dx + dy;
-    loop {
-        pts.push([x, y]);
-        if x == to[0] && y == to[1] {
-            break;
-        }
-        let e2 = err * 2;
-        if e2 >= dy {
-            err += dy;
-            x += sx;
-        }
-        if e2 <= dx {
-            err += dx;
-            y += sy;
-        }
-    }
-    pts
 }
 
 /// Replace cells equal to `from` within the rectangle using deterministic

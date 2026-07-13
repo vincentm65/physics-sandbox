@@ -1,45 +1,204 @@
 {
   "name": "Hillside House Fire",
-  "width": 120,
-  "height": 70,
+  "width": 140,
+  "height": 80,
   "prefabs": {
     "window": [
-      {"op":"rect", "x":0, "y":0, "width":7, "height":4, "material":"glass"}
+      {"op":"rect", "x":0, "y":0, "width":6, "height":4, "material":"glass"},
+      {"op":"rect", "x":2, "y":0, "width":1, "height":4, "material":"wood"}
     ],
-    "room_fireload": [
-      {"op":"rect", "x":0, "y":0, "width":9, "height":2, "material":"wood"},
-      {"op":"rect", "x":1, "y":-3, "width":2, "height":3, "material":"wood"}
+    "tall_window": [
+      {"op":"rect", "x":0, "y":0, "width":4, "height":6, "material":"glass"},
+      {"op":"rect", "x":1, "y":0, "width":1, "height":6, "material":"wood"}
+    ],
+    "door": [
+      {"op":"rect", "x":0, "y":0, "width":5, "height":8, "material":"empty"}
+    ],
+    "sofa": [
+      {"op":"rect", "x":0, "y":0, "width":12, "height":2, "material":"wood"},
+      {"op":"rect", "x":0, "y":-2, "width":2, "height":2, "material":"wood"},
+      {"op":"rect", "x":10, "y":-2, "width":2, "height":2, "material":"wood"}
+    ],
+    "bed": [
+      {"op":"rect", "x":0, "y":0, "width":10, "height":2, "material":"wood"},
+      {"op":"rect", "x":0, "y":-1, "width":2, "height":1, "material":"wood"},
+      {"op":"rect", "x":8, "y":-3, "width":2, "height":3, "material":"wood"}
+    ],
+    "table": [
+      {"op":"rect", "x":0, "y":0, "width":7, "height":1, "material":"wood"},
+      {"op":"rect", "x":0, "y":-2, "width":1, "height":2, "material":"wood"},
+      {"op":"rect", "x":6, "y":-2, "width":1, "height":2, "material":"wood"}
+    ],
+    "bookshelf": [
+      {"op":"hollow_rect", "x":0, "y":0, "width":4, "height":6, "thickness":1, "material":"wood"},
+      {"op":"rect", "x":0, "y":2, "width":4, "height":1, "material":"wood"},
+      {"op":"rect", "x":0, "y":4, "width":4, "height":1, "material":"wood"}
+    ],
+    "kitchen_block": [
+      {"op":"rect", "x":0, "y":0, "width":14, "height":2, "material":"wood"},
+      {"op":"rect", "x":0, "y":-3, "width":3, "height":3, "material":"wood"},
+      {"op":"rect", "x":11, "y":-2, "width":3, "height":2, "material":"metal"},
+      {"op":"rect", "x":12, "y":-1, "width":1, "height":1, "material":"oil"}
+    ],
+    "crate": [
+      {"op":"hollow_rect", "x":0, "y":0, "width":5, "height":3, "thickness":1, "material":"wood"}
+    ],
+    "planter": [
+      {"op":"rect", "x":0, "y":0, "width":4, "height":1, "material":"wood"},
+      {"op":"rect", "x":1, "y":-1, "width":2, "height":1, "material":"plant"}
+    ],
+    "bench": [
+      {"op":"rect", "x":0, "y":0, "width":6, "height":1, "material":"wood"},
+      {"op":"rect", "x":0, "y":-1, "width":1, "height":1, "material":"wood"},
+      {"op":"rect", "x":5, "y":-1, "width":1, "height":1, "material":"wood"}
+    ],
+    "tree": [
+      {"op":"rect", "x":0, "y":0, "width":2, "height":10, "material":"wood"},
+      {"op":"disc", "center":[1,-4], "radius":5, "material":"plant"},
+      {"op":"disc", "center":[-2,-2], "radius":3, "material":"plant"},
+      {"op":"disc", "center":[4,-2], "radius":3, "material":"plant"}
+    ],
+    "bush": [
+      {"op":"disc", "center":[0,0], "radius":2, "material":"plant"}
     ]
   },
   "operations": [
-    {"op":"terrain", "points":[[0,57],[18,55],[38,58],[61,56],[82,60],[119,58]], "depth":10, "material":"stone"},
-    {"op":"vary", "x":0, "y":55, "width":120, "height":15, "from":"stone", "materials":["sand","coal"], "chance":0.12, "seed":11},
+    {"op":"terrain", "points":[[0,66],[22,64],[48,67],[78,65],[104,68],[139,66]], "depth":12, "material":"stone"},
+    {"op":"vary", "x":0, "y":63, "width":140, "height":17, "from":"stone", "materials":["sand","coal"], "chance":0.12, "seed":11},
 
-    {"op":"rect", "x":22, "y":52, "width":72, "height":4, "material":"concrete"},
-    {"op":"building", "x":26, "y":20, "width":64, "height":32, "wall_thickness":2, "floors":2, "material":"wood"},
-    {"op":"line", "from":[22,20], "to":[58,7], "thickness":3, "material":"stone"},
-    {"op":"line", "from":[58,7], "to":[94,20], "thickness":3, "material":"stone"},
-    {"op":"line", "from":[58,7], "to":[58,20], "thickness":2, "material":"wood"},
+    {"op":"rect", "x":24, "y":66, "width":88, "height":4, "material":"concrete"},
+    {"op":"rect", "x":26, "y":54, "width":84, "height":12, "material":"concrete"},
+    {"op":"rect", "x":30, "y":54, "width":76, "height":12, "material":"empty"},
+    {"op":"rect", "x":28, "y":65, "width":80, "height":2, "material":"concrete"},
 
-    {"op":"repeat", "count":3, "offset":[18,0], "operations":[
-      {"op":"prefab", "name":"window", "x":32, "y":25}
-    ]},
-    {"op":"repeat", "count":2, "offset":[28,0], "operations":[
-      {"op":"prefab", "name":"window", "x":36, "y":39}
-    ]},
-    {"op":"rect", "x":56, "y":43, "width":7, "height":9, "material":"empty"},
+    {"op":"rect", "x":28, "y":22, "width":3, "height":34, "material":"wood"},
+    {"op":"rect", "x":105, "y":22, "width":3, "height":34, "material":"wood"},
+    {"op":"rect", "x":28, "y":54, "width":3, "height":12, "material":"concrete"},
+    {"op":"rect", "x":105, "y":54, "width":3, "height":12, "material":"concrete"},
 
-    {"op":"rect", "x":47, "y":22, "width":2, "height":14, "material":"concrete"},
-    {"op":"rect", "x":72, "y":36, "width":2, "height":16, "material":"concrete"},
-    {"op":"repeat", "count":3, "offset":[22,0], "operations":[
-      {"op":"prefab", "name":"room_fireload", "x":31, "y":50}
-    ]},
-    {"op":"prefab", "name":"room_fireload", "x":63, "y":34},
+    {"op":"rect", "x":48, "y":22, "width":2, "height":44, "material":"wood"},
+    {"op":"rect", "x":68, "y":22, "width":2, "height":44, "material":"wood"},
+    {"op":"rect", "x":88, "y":22, "width":2, "height":44, "material":"wood"},
+    {"op":"rect", "x":48, "y":54, "width":2, "height":12, "material":"concrete"},
+    {"op":"rect", "x":68, "y":54, "width":2, "height":12, "material":"concrete"},
+    {"op":"rect", "x":88, "y":54, "width":2, "height":12, "material":"concrete"},
 
-    {"op":"tank", "x":96, "y":42, "width":13, "height":14, "wall":"metal", "contents":"oil", "fill":0.75},
-    {"op":"line", "from":[96,50], "to":[82,50], "thickness":2, "material":"metal"},
-    {"op":"line", "from":[96,50], "to":[82,50], "material":"oil"},
-    {"op":"tank", "x":8, "y":42, "width":12, "height":14, "wall":"stone", "contents":"water", "fill":0.85},
-    {"op":"rect", "x":85, "y":47, "width":2, "height":2, "material":"fire"}
+    {"op":"rect", "x":28, "y":52, "width":80, "height":2, "material":"wood"},
+    {"op":"rect", "x":28, "y":36, "width":80, "height":2, "material":"wood"},
+    {"op":"rect", "x":28, "y":22, "width":80, "height":2, "material":"wood"},
+
+    {"op":"rect", "x":70, "y":52, "width":16, "height":2, "material":"empty"},
+    {"op":"rect", "x":70, "y":36, "width":16, "height":2, "material":"empty"},
+    {"op":"rect", "x":78, "y":22, "width":8, "height":2, "material":"empty"},
+
+    {"op":"stairs", "x":70, "y":54, "steps":10, "step_width":1, "rise_left":false, "material":"wood"},
+    {"op":"stairs", "x":70, "y":38, "steps":10, "step_width":1, "rise_left":true, "material":"wood"},
+    {"op":"stairs", "x":78, "y":24, "steps":8, "step_width":1, "rise_left":false, "material":"wood"},
+
+    {"op":"rect", "x":68, "y":44, "width":1, "height":8, "material":"empty"},
+    {"op":"rect", "x":88, "y":44, "width":1, "height":8, "material":"empty"},
+    {"op":"rect", "x":48, "y":44, "width":1, "height":8, "material":"empty"},
+    {"op":"rect", "x":68, "y":28, "width":1, "height":8, "material":"empty"},
+    {"op":"rect", "x":88, "y":28, "width":1, "height":8, "material":"empty"},
+    {"op":"rect", "x":48, "y":28, "width":1, "height":8, "material":"empty"},
+
+    {"op":"line", "from":[22,24], "to":[68,6], "thickness":3, "material":"wood"},
+    {"op":"line", "from":[114,24], "to":[68,6], "thickness":3, "material":"wood"},
+    {"op":"rect", "x":22, "y":22, "width":92, "height":2, "material":"wood"},
+    {"op":"rect", "x":66, "y":6, "width":5, "height":2, "material":"wood"},
+    {"op":"rect", "x":67, "y":8, "width":2, "height":14, "material":"wood"},
+    {"op":"line", "from":[32,22], "to":[58,12], "thickness":2, "material":"wood"},
+    {"op":"line", "from":[104,22], "to":[78,12], "thickness":2, "material":"wood"},
+    {"op":"rect", "x":48, "y":14, "width":40, "height":1, "material":"wood"},
+    {"op":"rect", "x":40, "y":18, "width":56, "height":1, "material":"wood"},
+
+    {"op":"rect", "x":38, "y":16, "width":2, "height":6, "material":"wood"},
+    {"op":"rect", "x":96, "y":16, "width":2, "height":6, "material":"wood"},
+
+    {"op":"rect", "x":40, "y":10, "width":2, "height":12, "material":"wood"},
+    {"op":"rect", "x":52, "y":10, "width":2, "height":12, "material":"wood"},
+    {"op":"rect", "x":40, "y":16, "width":14, "height":1, "material":"wood"},
+    {"op":"line", "from":[40,16], "to":[46,8], "thickness":2, "material":"wood"},
+    {"op":"line", "from":[54,16], "to":[46,8], "thickness":2, "material":"wood"},
+    {"op":"rect", "x":42, "y":10, "width":10, "height":6, "material":"glass"},
+
+    {"op":"rect", "x":105, "y":4, "width":5, "height":62, "material":"stone"},
+    {"op":"rect", "x":106, "y":6, "width":3, "height":44, "material":"empty"},
+    {"op":"rect", "x":102, "y":46, "width":8, "height":8, "material":"stone"},
+    {"op":"rect", "x":103, "y":47, "width":3, "height":5, "material":"empty"},
+    {"op":"rect", "x":104, "y":50, "width":1, "height":1, "material":"ember"},
+    {"op":"rect", "x":104, "y":20, "width":7, "height":4, "material":"stone"},
+
+    {"op":"rect", "x":16, "y":52, "width":14, "height":2, "material":"concrete"},
+    {"op":"rect", "x":16, "y":54, "width":2, "height":12, "material":"wood"},
+    {"op":"rect", "x":22, "y":54, "width":2, "height":12, "material":"wood"},
+    {"op":"line", "from":[15,52], "to":[31,38], "thickness":2, "material":"wood"},
+    {"op":"prefab", "name":"door", "x":28, "y":44},
+    {"op":"rect", "x":27, "y":52, "width":7, "height":2, "material":"wood"},
+    {"op":"prefab", "name":"bench", "x":17, "y":51},
+    {"op":"prefab", "name":"planter", "x":18, "y":50},
+
+    {"op":"prefab", "name":"window", "x":28, "y":42},
+    {"op":"prefab", "name":"window", "x":28, "y":26},
+    {"op":"prefab", "name":"window", "x":105, "y":42},
+    {"op":"prefab", "name":"window", "x":105, "y":26},
+    {"op":"prefab", "name":"tall_window", "x":34, "y":42},
+    {"op":"prefab", "name":"tall_window", "x":54, "y":42},
+    {"op":"prefab", "name":"tall_window", "x":92, "y":42},
+    {"op":"prefab", "name":"tall_window", "x":34, "y":26},
+    {"op":"prefab", "name":"tall_window", "x":54, "y":26},
+    {"op":"prefab", "name":"tall_window", "x":92, "y":26},
+
+    {"op":"prefab", "name":"sofa", "x":33, "y":50},
+    {"op":"prefab", "name":"table", "x":52, "y":50},
+    {"op":"prefab", "name":"bookshelf", "x":62, "y":46},
+    {"op":"prefab", "name":"kitchen_block", "x":90, "y":50},
+    {"op":"prefab", "name":"planter", "x":46, "y":50},
+
+    {"op":"prefab", "name":"bed", "x":33, "y":34},
+    {"op":"prefab", "name":"bookshelf", "x":46, "y":30},
+    {"op":"prefab", "name":"bed", "x":72, "y":34},
+    {"op":"prefab", "name":"table", "x":92, "y":34},
+    {"op":"prefab", "name":"planter", "x":100, "y":34},
+
+    {"op":"prefab", "name":"crate", "x":33, "y":19},
+    {"op":"prefab", "name":"crate", "x":40, "y":19},
+    {"op":"prefab", "name":"crate", "x":92, "y":19},
+    {"op":"rect", "x":50, "y":20, "width":8, "height":2, "material":"wood"},
+    {"op":"rect", "x":98, "y":19, "width":4, "height":3, "material":"coal"},
+
+    {"op":"tank", "x":33, "y":56, "width":12, "height":8, "thickness":1, "wall":"metal", "contents":"water", "fill":0.85},
+    {"op":"rect", "x":50, "y":62, "width":6, "height":3, "material":"coal"},
+    {"op":"rect", "x":58, "y":61, "width":6, "height":4, "material":"oil"},
+    {"op":"rect", "x":90, "y":60, "width":10, "height":5, "material":"metal"},
+    {"op":"rect", "x":92, "y":61, "width":6, "height":3, "material":"oil"},
+    {"op":"line", "from":[45,60], "to":[50,60], "thickness":1, "material":"metal"},
+    {"op":"line", "from":[45,60], "to":[50,60], "material":"water"},
+
+    {"op":"rect", "x":112, "y":54, "width":16, "height":12, "material":"concrete"},
+    {"op":"tank", "x":114, "y":48, "width":12, "height":14, "thickness":1, "wall":"metal", "contents":"oil", "fill":0.8},
+    {"op":"line", "from":[114,56], "to":[108,56], "thickness":2, "material":"metal"},
+    {"op":"line", "from":[114,56], "to":[105,56], "material":"oil"},
+    {"op":"rect", "x":100, "y":49, "width":2, "height":2, "material":"fire"},
+
+    {"op":"tank", "x":6, "y":54, "width":10, "height":12, "thickness":1, "wall":"stone", "contents":"water", "fill":0.9},
+    {"op":"line", "from":[16,60], "to":[24,60], "thickness":2, "material":"metal"},
+    {"op":"line", "from":[16,60], "to":[24,60], "material":"water"},
+
+    {"op":"prefab", "name":"tree", "x":8, "y":56},
+    {"op":"prefab", "name":"tree", "x":18, "y":58},
+    {"op":"prefab", "name":"tree", "x":122, "y":58},
+    {"op":"prefab", "name":"tree", "x":132, "y":56},
+    {"op":"prefab", "name":"bush", "x":26, "y":65},
+    {"op":"prefab", "name":"bush", "x":112, "y":66},
+    {"op":"prefab", "name":"bush", "x":118, "y":66},
+    {"op":"rect", "x":24, "y":65, "width":10, "height":1, "material":"plant"},
+    {"op":"rect", "x":108, "y":65, "width":12, "height":1, "material":"plant"},
+
+    {"op":"tank", "x":110, "y":62, "width":4, "height":4, "thickness":1, "wall":"metal", "contents":"water", "fill":0.7},
+
+    {"op":"vary", "x":30, "y":24, "width":74, "height":28, "from":"wood", "materials":["empty"], "chance":0.015, "seed":73},
+    {"op":"rect", "x":56, "y":48, "width":2, "height":1, "material":"plant"},
+    {"op":"rect", "x":96, "y":32, "width":2, "height":1, "material":"plant"}
   ]
 }

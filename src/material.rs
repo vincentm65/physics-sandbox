@@ -34,6 +34,9 @@ pub enum Material {
     Faucet,
     Drain,
     Concrete,
+    Firework,
+    FireworkSpark,
+    BrokenGlass,
 }
 use Material::*;
 
@@ -56,10 +59,14 @@ impl Material {
     ];
 
     /// Every material, grouped by phase, in the order the picker lists them.
-    pub const ALL: [Material; 29] = [
+    pub const ALL: [Material; 31] = [
+        // fireworks
+        Firework,
         // powders / granular
         Sand,
+        BrokenGlass,
         Ash,
+
         Salt,
         Gunpowder,
         Coal,
@@ -119,9 +126,13 @@ impl Material {
             Napalm => "Napalm",
             Coal => "Coal",
             Glass => "Glass",
+            BrokenGlass => "Broken glass",
             Metal => "Metal",
+
             LiquidNitrogen => "Liquid nitrogen",
             Concrete => "Concrete",
+            Firework => "Firework",
+            FireworkSpark => "Firework spark",
             Faucet => "Faucet",
             Drain => "Drain",
         }
@@ -149,10 +160,12 @@ impl Material {
             LiquidNitrogen => 1,
             Coal => 6,
             Glass => 7,
+            BrokenGlass => 6,
             Concrete => 10,
+
             Metal => 14,
-            Faucet => 0,
-            Drain => 0,
+            FireworkSpark => 1,
+            Faucet | Drain | Firework => 0,
             _ => 0,
         }
     }
@@ -167,13 +180,17 @@ impl Material {
         matches!(self, Empty)
     }
     pub fn is_gas(self) -> bool {
-        matches!(self, Fire | Steam | Smoke)
+        matches!(self, Fire | Steam | Smoke | FireworkSpark)
     }
+
     /// Anything gravity/buoyancy can displace by swapping cells.
     pub fn is_fluid(self) -> bool {
         self.is_gas()
             || self.is_liquid()
-            || matches!(self, Sand | Ash | Ember | Salt | Gunpowder | Coal)
+            || matches!(
+                self,
+                Sand | BrokenGlass | Ash | Ember | Salt | Gunpowder | Coal
+            )
     }
     pub fn can_sink_into(self, other: Material) -> bool {
         other.is_empty() || (other.is_fluid() && self.density() > other.density())
@@ -215,11 +232,11 @@ impl Material {
     pub fn melt(self) -> Option<(u16, u16, Material)> {
         match self {
             Ice => Some((1, 4, Water)),
-            Glass => Some((1_100, 90, Sand)),
+            Glass => Some((1_100, 90, BrokenGlass)),
             Stone => Some((1_200, 150, Sand)),
             Concrete => Some((1_250, 180, Sand)),
             Metal => Some((1_250, 220, Lava)),
-            Sand => Some((1_280, 200, Lava)),
+            Sand | BrokenGlass => Some((1_280, 200, Lava)),
             _ => None,
         }
     }
@@ -250,9 +267,10 @@ impl Material {
             Metal => 8,
             Empty | Fire | Steam | Smoke => 6,
             Water | Acid | Lava | LiquidNitrogen | Mercury | Oil | Napalm => 5,
-            Glass | Ice | Sand | Salt | Ash => 4,
+            Glass | BrokenGlass | Ice | Sand | Salt | Ash => 4,
             Ember | Gunpowder | Coal => 3,
-            Wood | Plant | Fuse | Tnt | C4 | Stone | Concrete => 2,
+            Wood | Plant | Fuse | Tnt | C4 | Firework | Stone | Concrete => 2,
+            FireworkSpark => 6,
             Faucet | Drain => 3,
         }
     }
@@ -261,13 +279,13 @@ impl Material {
     pub fn acid_resistance(self) -> u32 {
         match self {
             Empty | Acid => 1000,
-            Stone | Concrete | Glass => 1000,
+            Stone | Concrete | Glass | BrokenGlass => 1000,
             Metal => 920,
             Sand | Ash | Salt | Coal | Gunpowder => 100,
             Ice => 50,
-            Plant | Wood | Fuse => 0,
+            Plant | Wood | Fuse | Firework => 0,
             Oil | Napalm | Water | Mercury | Lava | LiquidNitrogen => 700,
-            Fire | Ember | Steam | Smoke | Tnt | C4 | Faucet | Drain => 1000,
+            Fire | Ember | Steam | Smoke | FireworkSpark | Tnt | C4 | Faucet | Drain => 1000,
         }
     }
 
@@ -276,10 +294,10 @@ impl Material {
         matches!(self, Metal | Concrete)
     }
 
-    /// Blast hits on glass shatter into sand rather than fire/smoke.
+    /// Blast hits on glass shatter into shards rather than fire/smoke.
     pub fn blast_shatter_product(self) -> Option<Material> {
         match self {
-            Glass => Some(Sand),
+            Glass => Some(BrokenGlass),
             _ => None,
         }
     }
@@ -327,6 +345,9 @@ impl Material {
             26 => Some(Faucet),
             27 => Some(Drain),
             28 => Some(Concrete),
+            29 => Some(Firework),
+            30 => Some(FireworkSpark),
+            31 => Some(BrokenGlass),
             _ => None,
         }
     }
@@ -385,12 +406,40 @@ impl Material {
             C4 => Color::Rgb(rs(76, 24), rs(92, 24), rs(38, 14)),
             Napalm => Color::Rgb(rt(220, 30), rt(72, 35), rt(18, 16)),
             Coal => Color::Rgb(rs(24, 16), rs(24, 16), rs(28, 18)),
-            Glass => Color::Rgb(rs(145, 30), rs(205, 25), rs(220, 25)),
+            // Intact pane: cool cyan-teal, tight variance so it reads as one colour.
+            Glass => Color::Rgb(rs(148, 14), rs(200, 12), rs(214, 10)),
+            // Shards: same family, slightly paler/frosted with more grain variance.
+            BrokenGlass => Color::Rgb(rs(168, 32), rs(204, 24), rs(216, 22)),
             Metal => Color::Rgb(rs(150, 35), rs(158, 35), rs(168, 35)),
             LiquidNitrogen => Color::Rgb(rs(180, 25), rs(225, 25), 250),
             Faucet => Color::Rgb(rs(140, 30), rs(148, 30), rs(155, 30)),
             Drain => Color::Rgb(rs(48, 18), rs(52, 18), rs(58, 18)),
             Concrete => Color::Rgb(rs(100, 20), rs(100, 20), rs(108, 20)),
+            Firework => {
+                if life == 0 {
+                    Color::Rgb(rs(88, 24), rs(42, 16), rs(26, 12))
+                } else {
+                    Color::Rgb(rt(240, 16), rt(196, 40), rt(80, 30))
+                }
+            }
+            FireworkSpark => {
+                // Twinkle brightly at first, then dim rather than disappearing abruptly.
+                let glow = (life.min(18) as u8).saturating_mul(13).saturating_add(
+                    if (tick + seed as u64).is_multiple_of(3) {
+                        20
+                    } else {
+                        0
+                    },
+                );
+                match seed % 6 {
+                    0 => Color::Rgb(glow, glow / 4, glow / 6),
+                    1 => Color::Rgb(glow / 5, glow, glow / 3),
+                    2 => Color::Rgb(glow / 5, glow / 2, glow),
+                    3 => Color::Rgb(glow, glow.saturating_mul(3) / 4, glow / 8),
+                    4 => Color::Rgb(glow, glow / 4, glow.saturating_mul(2) / 3),
+                    _ => Color::Rgb(glow.saturating_mul(3) / 4, glow / 2, glow),
+                }
+            }
         }
     }
 }
