@@ -19,15 +19,6 @@ impl Scene {
         }
     }
 
-    pub fn next(self) -> Self {
-        let i = Self::ALL.iter().position(|&s| s == self).unwrap_or(0);
-        Self::ALL[(i + 1) % Self::ALL.len()]
-    }
-
-    pub fn prev(self) -> Self {
-        let i = Self::ALL.iter().position(|&s| s == self).unwrap_or(0);
-        Self::ALL[(i + Self::ALL.len() - 1) % Self::ALL.len()]
-    }
 }
 
 pub struct World {

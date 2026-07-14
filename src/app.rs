@@ -60,7 +60,7 @@ impl EditorTool {
 #[derive(Debug, Default)]
 pub struct SceneMenu {
     pub open: bool,
-    /// Saved scene names (filenames without .json).
+    /// Scene names — built-in scenes are prefixed with `BUILTIN_PREFIX`.
     pub scenes: Vec<String>,
     /// Cursor position in the scene list.
     pub cursor: usize,
@@ -70,11 +70,33 @@ pub struct SceneMenu {
     pub save_name: String,
 }
 
+/// Prefix that marks built-in scenes in the menu list.
+const BUILTIN_PREFIX: &str = "[Built-in] ";
+
 impl SceneMenu {
-    /// Refresh the list of saved scenes from disk.
+    /// Refresh the list: built-in scenes first, then user-saved scenes.
     pub fn refresh(&mut self) {
-        self.scenes = scene_manager::list_scenes().unwrap_or_default();
+        self.scenes.clear();
+        for scene in &Scene::ALL {
+            self.scenes.push(format!("{BUILTIN_PREFIX}{}", scene.name()));
+        }
+        if let Ok(mut user) = scene_manager::list_scenes() {
+            self.scenes.append(&mut user);
+        }
         self.cursor = 0;
+    }
+
+    /// Is the scene at the cursor a built-in?
+    fn cursor_is_builtin(&self) -> bool {
+        self.scenes
+            .get(self.cursor)
+            .is_some_and(|n| n.starts_with(BUILTIN_PREFIX))
+    }
+
+    /// Map a built-in scene name back to its `Scene` variant.
+    fn builtin_scene(name: &str) -> Option<Scene> {
+        let short = name.strip_prefix(BUILTIN_PREFIX)?;
+        Scene::ALL.iter().find(|s| s.name() == short).copied()
     }
 
     /// Open the menu and load scene list.
@@ -95,7 +117,6 @@ impl SceneMenu {
     /// Save the current world as a scene.
     pub fn save_scene(&mut self, world: &World) {
         let name = if self.save_name.is_empty() {
-            // Auto-name: "Scene N" where N is next available
             let mut n = 1;
             while self.scenes.iter().any(|s| s == &format!("Scene {n}")) {
                 n += 1;
@@ -112,15 +133,24 @@ impl SceneMenu {
         self.saving = false;
     }
 
-    /// Load a selected scene into the world.
-    pub fn load_selected(&self) -> Option<scene_manager::SceneState> {
-        self.scenes
-            .get(self.cursor)
-            .and_then(|name| scene_manager::load_scene_state(name).ok())
+    /// Load the selected scene into the world. Handles both built-in and
+    /// user-saved scenes.
+    pub fn load_selected(&self, world: &mut World) {
+        let Some(name) = self.scenes.get(self.cursor) else {
+            return;
+        };
+        if let Some(scene) = Self::builtin_scene(name) {
+            world.load_scene(scene);
+        } else if let Ok(state) = scene_manager::load_scene_state(name) {
+            world.restore_from(&state);
+        }
     }
 
-    /// Delete the selected scene.
+    /// Delete the selected scene (user scenes only).
     pub fn delete_selected(&mut self) {
+        if self.cursor_is_builtin() {
+            return;
+        }
         if let Some(name) = self.scenes.get(self.cursor).cloned() {
             let _ = scene_manager::delete_scene(&name);
             self.refresh();
@@ -153,9 +183,6 @@ pub struct App {
     /// Drag endpoints for shape placement and preview.
     pub editor_start: Option<(i32, i32)>,
     pub editor_end: Option<(i32, i32)>,
-    /// Scene management menu.
-    /// Dedicated level-editing mode. Simulation is paused while active.
-    pub editor_mode: bool,
     /// 1× shows the whole world; 2× enlarges each cell.
     pub zoom: u8,
     /// View origin used while zoomed in.
@@ -194,7 +221,6 @@ impl Default for App {
             editor_start: None,
             editor_end: None,
             scene_menu: SceneMenu::default(),
-            editor_mode: false,
             zoom: 1,
             camera: (0, 0),
             pan_start: None,
@@ -268,26 +294,9 @@ impl App {
         }
 
         match k.code {
-            KeyCode::F(2) => {
-                self.editor_mode = !self.editor_mode;
-                self.pan_start = None;
-                self.paused = self.editor_mode;
-                self.pasting = false;
-                self.cancel_shape();
-            }
             KeyCode::Char(' ') | KeyCode::Char('p') => self.paused = !self.paused,
             KeyCode::Char('c') => {
                 world.clear();
-                self.last_mouse = None;
-            }
-            KeyCode::Char('n') => {
-                self.scene = self.scene.next();
-                world.load_scene(self.scene);
-                self.last_mouse = None;
-            }
-            KeyCode::Char('N') => {
-                self.scene = self.scene.prev();
-                world.load_scene(self.scene);
                 self.last_mouse = None;
             }
             KeyCode::Char('r') => {
@@ -297,14 +306,14 @@ impl App {
             KeyCode::Char('s') => self.scene_menu.open_menu(),
             KeyCode::Char('e') | KeyCode::Char('E') => self.open_tool_picker(),
             KeyCode::Tab | KeyCode::Enter | KeyCode::Char('m') => self.open_picker(),
-            KeyCode::Char('z') if self.editor_mode => self.zoom = 1,
-            KeyCode::Char('x') if self.editor_mode => self.zoom = 2,
-            KeyCode::Char('i') if self.editor_mode => self.pan(0, -4),
-            KeyCode::Char('j') if self.editor_mode => self.pan(-4, 0),
-            KeyCode::Char('k') if self.editor_mode => self.pan(0, 4),
-            KeyCode::Char('l') if self.editor_mode => self.pan(4, 0),
-            KeyCode::Char('h') if self.editor_mode => self.toggle_mirror(MirrorAxis::Horizontal),
-            KeyCode::Char('v') if self.editor_mode => self.toggle_mirror(MirrorAxis::Vertical),
+            KeyCode::Char('z') => self.zoom = 1,
+            KeyCode::Char('x') => self.zoom = 2,
+            KeyCode::Char('i') => self.pan(0, -4),
+            KeyCode::Char('j') => self.pan(-4, 0),
+            KeyCode::Char('k') => self.pan(0, 4),
+            KeyCode::Char('l') => self.pan(4, 0),
+            KeyCode::Char('h') => self.toggle_mirror(MirrorAxis::Horizontal),
+            KeyCode::Char('v') => self.toggle_mirror(MirrorAxis::Vertical),
             KeyCode::Char('[') | KeyCode::Char('-') | KeyCode::Left => {
                 self.brush = self.brush.saturating_sub(1)
             }
@@ -383,9 +392,7 @@ impl App {
                 self.scene_menu.cursor = (self.scene_menu.cursor + 1) % n;
             }
             KeyCode::Char('l') | KeyCode::Enter => {
-                if let Some(state) = self.scene_menu.load_selected() {
-                    world.restore_from(&state);
-                }
+                self.scene_menu.load_selected(world);
             }
             KeyCode::Char('d') => {
                 self.scene_menu.delete_selected();
@@ -446,31 +453,27 @@ impl App {
     }
 
     fn handle_mouse(&mut self, me: &MouseEvent, world: &mut World) -> bool {
-        if self.editor_mode && !self.picker_open && !self.scene_menu.open {
+        if !self.picker_open && !self.scene_menu.open {
             self.paste_cursor = Some(self.mouse_to_world(me));
         }
         match me.kind {
-            // In editor mode, the wheel zooms around the cell beneath the cursor.
+            // Scroll wheel zooms around the cell beneath the cursor.
             MouseEventKind::ScrollUp => {
                 if self.picker_open {
                     let n = Material::ALL.len();
                     self.picker_cursor = (self.picker_cursor + n - 1) % n;
-                } else if self.editor_mode {
-                    self.set_zoom_at(me, 2);
                 } else {
-                    self.brush = self.brush.saturating_sub(1);
+                    self.set_zoom_at(me, 2);
                 }
             }
             MouseEventKind::ScrollDown => {
                 if self.picker_open {
                     self.picker_cursor = (self.picker_cursor + 1) % Material::ALL.len();
-                } else if self.editor_mode {
-                    self.set_zoom_at(me, 1);
                 } else {
-                    self.brush = (self.brush + 1).min(MAX_BRUSH);
+                    self.set_zoom_at(me, 1);
                 }
             }
-            MouseEventKind::Down(MouseButton::Middle) if self.editor_mode => {
+            MouseEventKind::Down(MouseButton::Middle) => {
                 self.pan_start = Some(((me.column, me.row), self.camera));
             }
             MouseEventKind::Down(MouseButton::Left) => {
@@ -495,7 +498,7 @@ impl App {
             MouseEventKind::Drag(MouseButton::Left) if !self.picker_open => {
                 self.paint_drag(me, world)
             }
-            MouseEventKind::Drag(MouseButton::Middle) if self.editor_mode => self.pan_to(me),
+            MouseEventKind::Drag(MouseButton::Middle) => self.pan_to(me),
             MouseEventKind::Moved if !self.picker_open && self.drawing => {
                 self.paint_drag(me, world)
             }

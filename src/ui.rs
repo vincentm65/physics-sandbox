@@ -116,24 +116,16 @@ fn draw_status(frame: &mut Frame, app: &App, area: &Rect) {
             cell.set_bg(bg);
         }
     }
-
     let name = app.selected.name();
-    let bar = brush_bar(app.brush);
-    let paused = if app.paused { "   ‖ PAUSED" } else { "" };
-    let scene = app.scene.name();
     let tool = app.tool.name();
-    let mode = if app.editor_mode { "EDITOR" } else { "SIM" };
-    let mirror = app.mirror.map(|axis| axis.name()).unwrap_or("No mirror");
-    let paste = if app.pasting { "  PASTE: click" } else { "" };
-    let s = if app.editor_mode {
-        format!(
-            "  ▀ {name}   {mode} {tool}   {mirror}   Wheel=Zoom   Middle-drag=Pan   H/V=Mirror   Ctrl+C/V=Copy/Paste{paste}   E=Tools  S=Saved  F2=Play"
-        )
-    } else {
-        format!(
-            "  ▀ {name}   Tool {tool} (E)   Size {bar}   Scene {scene}   F2=Editor   Tab=Materials   Wheel/Arrows/[]=Size   Space=Pause  C=Clear  R=Reset  S=Saved  Q=Quit{paused}"
-        )
-    };
+    let mirror = app.mirror.map(|axis| axis.name()).unwrap_or_default();
+    let paused = if app.paused { " ‖" } else { "" };
+    let paste = if app.pasting { " PASTE" } else { "" };
+    let scene = app.scene.name();
+    let s = format!(
+        "  ▀ {name}   {tool}   Brush:{}/8   {mirror}   {scene}{paused}{paste}   Z=Zoom  Pan=drag  H/V=Mirror  E=Tools  S=Scenes",
+        app.brush,
+    );
 
     for (i, ch) in s.chars().enumerate() {
         let x = area.x + i as u16;
@@ -160,10 +152,6 @@ fn draw_status(frame: &mut Frame, app: &App, area: &Rect) {
     }
 }
 
-/// Fixed-size dot gauge for the brush radius (0..=8).
-fn brush_bar(b: usize) -> String {
-    (0..=8).map(|i| if i <= b { '●' } else { '·' }).collect()
-}
 
 pub fn tool_picker_rect(w: u16, h: u16) -> Rect {
     let width = 26.min(w.saturating_sub(2));
