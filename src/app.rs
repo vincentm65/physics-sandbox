@@ -1,5 +1,5 @@
 use crossterm::event::{
-    Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 
 use crate::material::Material;
@@ -212,7 +212,8 @@ impl App {
     /// Apply one input event. Returns `false` to signal the loop should exit.
     pub fn handle(&mut self, ev: &Event, world: &mut World) -> bool {
         match ev {
-            Event::Key(k) => self.handle_key(k, world),
+            Event::Key(k) if k.kind != KeyEventKind::Release => self.handle_key(k, world),
+            Event::Key(_) => true,
             Event::Mouse(me) => self.handle_mouse(me, world),
             _ => true,
         }
