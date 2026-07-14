@@ -50,7 +50,9 @@ fn draw_grid(frame: &mut Frame, world: &World, app: &App, area: &Rect) {
             let Some(cell) = cell else {
                 continue;
             };
-            if wx < 0 || top_y < 0 || wx as usize >= world.width || top_y as usize >= world.height {
+            let skip = wx < 0 || top_y < 0 || wx as usize >= world.width || top_y as usize >= world.height;
+            let skip = skip || bottom_y.is_some_and(|by| by < 0 || by as usize >= world.height);
+            if skip {
                 continue;
             }
             let ghost_top = app.paste_ghost_at(wx, top_y, world.width, world.height);
