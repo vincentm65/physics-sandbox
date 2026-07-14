@@ -458,10 +458,21 @@ impl App {
         }
         match me.kind {
             // Scroll wheel zooms around the cell beneath the cursor.
+            // Ctrl+scroll adjusts brush size instead.
             MouseEventKind::ScrollUp => {
                 if self.picker_open {
                     let n = Material::ALL.len();
                     self.picker_cursor = (self.picker_cursor + n - 1) % n;
+                } else if self.tool_picker_open {
+                    let n = EditorTool::ALL.len();
+                    self.tool_picker_cursor = (self.tool_picker_cursor + n - 1) % n;
+                } else if self.scene_menu.open {
+                    let n = self.scene_menu.scenes.len();
+                    if n > 0 {
+                        self.scene_menu.cursor = (self.scene_menu.cursor + n - 1) % n;
+                    }
+                } else if me.modifiers.contains(KeyModifiers::CONTROL) {
+                    self.brush = (self.brush + 1).min(MAX_BRUSH);
                 } else {
                     self.set_zoom_at(me, 2);
                 }
@@ -469,6 +480,16 @@ impl App {
             MouseEventKind::ScrollDown => {
                 if self.picker_open {
                     self.picker_cursor = (self.picker_cursor + 1) % Material::ALL.len();
+                } else if self.tool_picker_open {
+                    let n = EditorTool::ALL.len();
+                    self.tool_picker_cursor = (self.tool_picker_cursor + 1) % n;
+                } else if self.scene_menu.open {
+                    let n = self.scene_menu.scenes.len();
+                    if n > 0 {
+                        self.scene_menu.cursor = (self.scene_menu.cursor + 1) % n;
+                    }
+                } else if me.modifiers.contains(KeyModifiers::CONTROL) {
+                    self.brush = self.brush.saturating_sub(1);
                 } else {
                     self.set_zoom_at(me, 1);
                 }
