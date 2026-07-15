@@ -1207,9 +1207,11 @@ impl World {
         self.step_heat();
         self.step_structural_components();
 
-        // Atmosphere transport & combustion (only when enabled).
+        // Atmosphere transport, combustion, and pressure forces run before
+        // material movement so drafts affect responsive cells in this tick.
         if self.atmos_enabled {
             self.step_atmosphere();
+            self.step_pressure_forces();
         }
 
         for chunk_y in (0..self.chunks_y).rev() {
@@ -1315,11 +1317,6 @@ impl World {
             }
         }
         std::mem::swap(&mut self.active_chunks, &mut self.next_active_chunks);
-
-        // Pressure‑gradient impulses (after movement so forces act on settled cells).
-        if self.atmos_enabled {
-            self.step_pressure_forces();
-        }
 
         self.tick = self.tick.wrapping_add(1);
     }

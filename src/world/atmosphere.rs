@@ -850,4 +850,40 @@ mod tests {
             "pressure gradient should apply some impulse"
         );
     }
+
+    #[test]
+    fn smoke_follows_draft_through_one_cell_opening() {
+        let mut w = World::new(7, 5);
+        for y in 0..w.height {
+            if y != 2 {
+                w.paint(3, y, Metal);
+            }
+        }
+        w.paint(2, 2, Smoke);
+        let smoke = w.idx(2, 2);
+        w.life[smoke] = 100;
+        w.temp[smoke] = 500;
+        w.moved_tick[smoke] = u64::MAX;
+
+        let pressure_source = w.idx(1, 2);
+        w.air_mass[pressure_source] = MAX_AIR_MASS;
+        w.temp[pressure_source] = 900;
+        w.activate_now(2, 2);
+
+        w.step();
+
+        assert!(
+            (4..w.width).any(|x| w.get(x, 2) == Smoke),
+            "draft should carry smoke through the one-cell opening; smoke={:?}, pressures={:?}",
+            w.grid
+                .iter()
+                .enumerate()
+                .filter(|(_, material)| **material == Smoke)
+                .map(|(i, _)| (i % w.width, i / w.width, w.vx[i], w.vx_frac[i]))
+                .collect::<Vec<_>>(),
+            (0..w.width)
+                .map(|x| w.cell_pressure(w.idx(x, 2)))
+                .collect::<Vec<_>>()
+        );
+    }
 }
