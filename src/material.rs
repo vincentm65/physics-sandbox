@@ -66,7 +66,6 @@ impl Material {
         Sand,
         BrokenGlass,
         Ash,
-
         Salt,
         Gunpowder,
         Coal,

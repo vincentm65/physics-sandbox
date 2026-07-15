@@ -28,6 +28,9 @@ pub(crate) const FUSE_BURN_TICKS: u16 = 3;
 
 const CHUNK_W: usize = 64;
 const CHUNK_H: usize = 32;
+const MAX_VELOCITY: i8 = 4;
+const VELOCITY_SCALE: i8 = 4;
+const GRAVITY_PER_TICK: i8 = 1;
 
 /// Fraction of cooled embers that leave a residue of ash; the rest are fully
 /// consumed by the burn.
@@ -39,16 +42,6 @@ fn spread_of(m: Material) -> usize {
     match m {
         Water | LiquidNitrogen => 6,
         Acid | Oil => 4,
-        _ => 1,
-    }
-}
-
-/// Maximum number of downward cells a material can traverse in one tick.
-/// Faster materials still check every intermediate cell, so thin floors cannot
-/// be skipped.
-fn fall_speed_of(m: Material) -> usize {
-    match m {
-        Water | LiquidNitrogen | Mercury | Sand | BrokenGlass | Salt | Gunpowder => 2,
         _ => 1,
     }
 }

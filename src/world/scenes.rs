@@ -51,14 +51,7 @@ fn fill_line(
 /// (smaller y = higher). The wedge fills from just under the upper deck down
 /// to the lower deck and is pinned by side stringers, so every tread is
 /// backed by structure all the way to a supported landing.
-fn solid_stairs(
-    world: &mut World,
-    x0: usize,
-    x1: usize,
-    y_top: usize,
-    y_bot: usize,
-    m: Material,
-) {
+fn solid_stairs(world: &mut World, x0: usize, x1: usize, y_top: usize, y_bot: usize, m: Material) {
     if x1 <= x0 + 3 || y_bot <= y_top + 2 {
         return;
     }
@@ -243,7 +236,14 @@ pub(super) fn seed_house(world: &mut World) {
     // --- shell: exterior walls + continuous posts --------------------------
     // Timber from wall plate down to ground deck; concrete stem in basement.
     fill_column(world, left, y_plate, y_ground + floor_t, wall_t, Wood);
-    fill_column(world, right - wall_t, y_plate, y_ground + floor_t, wall_t, Wood);
+    fill_column(
+        world,
+        right - wall_t,
+        y_plate,
+        y_ground + floor_t,
+        wall_t,
+        Wood,
+    );
     fill_column(world, left, y_ground, grade, wall_t, Concrete);
     fill_column(world, right - wall_t, y_ground, grade, wall_t, Concrete);
 
@@ -265,7 +265,14 @@ pub(super) fn seed_house(world: &mut World) {
 
     // Re-assert posts/walls through decks so openings don't cut supports.
     fill_column(world, left, y_plate, y_ground + floor_t, wall_t, Wood);
-    fill_column(world, right - wall_t, y_plate, y_ground + floor_t, wall_t, Wood);
+    fill_column(
+        world,
+        right - wall_t,
+        y_plate,
+        y_ground + floor_t,
+        wall_t,
+        Wood,
+    );
     for &px in posts.iter().skip(1).take(n_bays - 1) {
         fill_column(world, px, y_plate, y_ground + floor_t, post_w, Wood);
         fill_column(world, px, y_ground, grade, post_w, Concrete);
@@ -337,12 +344,27 @@ pub(super) fn seed_house(world: &mut World) {
     fill_line(world, eave_l, y_plate, center, y_ridge, 3, Wood);
     fill_line(world, eave_r, y_plate, center, y_ridge, 3, Wood);
     let mid_y = y_ridge + roof_rise / 3;
-    fill_line(world, left, y_plate, center.saturating_sub(bay / 4), mid_y, 2, Wood);
+    fill_line(
+        world,
+        left,
+        y_plate,
+        center.saturating_sub(bay / 4),
+        mid_y,
+        2,
+        Wood,
+    );
     fill_line(world, right - 1, y_plate, center + bay / 4, mid_y, 2, Wood);
     fill_rect(world, center - 3, y_ridge, center + 4, y_ridge + 2, Wood);
     fill_column(world, center - 1, y_ridge + 2, y_plate, 2, Wood);
     if bay >= 6 {
-        fill_column(world, center.saturating_sub(bay / 3), mid_y, y_plate, 2, Wood);
+        fill_column(
+            world,
+            center.saturating_sub(bay / 3),
+            mid_y,
+            y_plate,
+            2,
+            Wood,
+        );
         fill_column(world, center + bay / 3, mid_y, y_plate, 2, Wood);
     }
 
@@ -399,7 +421,14 @@ pub(super) fn seed_house(world: &mut World) {
     let dorm_peak = dorm_sill.saturating_sub((roof_rise / 3).max(3));
     if dorm_peak + 2 < dorm_sill && dorm_x1 > dorm_x0 + 4 {
         fill_column(world, dorm_x0, dorm_peak, y_plate, 2, Wood);
-        fill_column(world, dorm_x1.saturating_sub(2), dorm_peak, y_plate, 2, Wood);
+        fill_column(
+            world,
+            dorm_x1.saturating_sub(2),
+            dorm_peak,
+            y_plate,
+            2,
+            Wood,
+        );
         fill_rect(world, dorm_x0, dorm_sill, dorm_x1, dorm_sill + 1, Wood);
         let dorm_mid = (dorm_x0 + dorm_x1) / 2;
         fill_line(world, dorm_x0, dorm_sill, dorm_mid, dorm_peak, 2, Wood);
@@ -459,7 +488,7 @@ pub(super) fn seed_house(world: &mut World) {
         );
     }
     // Hearth on ground floor, facing into the house.
-    let hearth_h = storey_clear.min(6).max(3);
+    let hearth_h = storey_clear.clamp(3, 6);
     let hearth_top = y_ground.saturating_sub(hearth_h);
     fill_rect(
         world,
@@ -633,7 +662,11 @@ pub(super) fn seed_house(world: &mut World) {
 
     // --- basement services -------------------------------------------------
     let tank_x0 = left + wall_t + 2;
-    let tank_x1 = posts.get(1).copied().unwrap_or(left + bay).saturating_sub(2);
+    let tank_x1 = posts
+        .get(1)
+        .copied()
+        .unwrap_or(left + bay)
+        .saturating_sub(2);
     let tank_top = bas_ceil + 1;
     let tank_bot = grade - 1;
     if tank_x1 > tank_x0 + 4 && tank_bot > tank_top + 3 {
@@ -657,7 +690,14 @@ pub(super) fn seed_house(world: &mut World) {
     let fuel_x0 = stair_x1 + 2;
     let fuel_x1 = chim_x0.saturating_sub(2);
     if fuel_x1 > fuel_x0 + 3 {
-        fill_rect(world, fuel_x0, grade.saturating_sub(3), fuel_x0 + 4, grade - 1, Coal);
+        fill_rect(
+            world,
+            fuel_x0,
+            grade.saturating_sub(3),
+            fuel_x0 + 4,
+            grade - 1,
+            Coal,
+        );
         fill_rect(
             world,
             fuel_x0 + 5,
@@ -730,7 +770,14 @@ pub(super) fn seed_house(world: &mut World) {
         fill_column(world, barrel_x, grade - 4, grade, 1, Metal);
         fill_column(world, barrel_x + 2, grade - 4, grade, 1, Metal);
         fill_rect(world, barrel_x, grade - 1, barrel_x + 3, grade, Metal);
-        fill_rect(world, barrel_x + 1, grade - 3, barrel_x + 2, grade - 1, Water);
+        fill_rect(
+            world,
+            barrel_x + 1,
+            grade - 3,
+            barrel_x + 2,
+            grade - 1,
+            Water,
+        );
     }
 }
 

@@ -55,7 +55,8 @@ impl World {
     }
 
     /// Push the cell at `(x, y)` further from the blast origin along `(dx, dy)`.
-    /// Returns true when the grain left its original cell.
+    /// Combines existing velocity with the outward displacement as an impulse,
+    /// clamped through MAX_VELOCITY. Returns true when the grain left its original cell.
     pub(super) fn fling_outward(&mut self, x: usize, y: usize, dx: i32, dy: i32) -> bool {
         let sx = dx.signum();
         let sy = dy.signum();
@@ -64,6 +65,10 @@ impl World {
         let life = self.life[i];
         let seed = self.seed[i];
         let temp = self.temp[i];
+        let vx = self.vx[i];
+        let vy = self.vy[i];
+        let vy_frac = self.vy_frac[i];
+        let y_frac = self.y_frac[i];
 
         // Prefer longer throws, then cardinal fallbacks when the diagonal is blocked.
         let candidates = [
@@ -91,14 +96,31 @@ impl World {
             }
             self.grid[i] = Empty;
             self.life[i] = 0;
+            self.vx[i] = 0;
+            self.vy[i] = 0;
+            self.vy_frac[i] = 0;
+            self.y_frac[i] = 0;
             self.temp[i] = AMBIENT_TEMP;
             self.moved_tick[i] = self.tick;
             self.activate_idx(i);
+
+            // Combine existing velocity with outward impulse in fixed-point units.
+            let new_vx = (vx as i32 + px).clamp(-(MAX_VELOCITY as i32), MAX_VELOCITY as i32) as i8;
+            let max_fixed = MAX_VELOCITY as i16 * VELOCITY_SCALE as i16;
+            let fixed_vy = vy as i16 * VELOCITY_SCALE as i16 + vy_frac as i16;
+            let new_fixed_vy =
+                (fixed_vy + py as i16 * VELOCITY_SCALE as i16).clamp(-max_fixed, max_fixed);
+            let new_vy = (new_fixed_vy / VELOCITY_SCALE as i16) as i8;
+            let new_vy_frac = (new_fixed_vy % VELOCITY_SCALE as i16) as i8;
 
             self.grid[li] = material;
             self.life[li] = life;
             self.seed[li] = seed;
             self.temp[li] = temp;
+            self.vx[li] = new_vx;
+            self.vy[li] = new_vy;
+            self.vy_frac[li] = new_vy_frac;
+            self.y_frac[li] = y_frac;
             self.moved_tick[li] = self.tick;
             self.activate_idx(li);
             return true;
@@ -106,13 +128,13 @@ impl World {
         false
     }
 
-    pub(super) fn step_combustible(&mut self, x: usize, y: usize) -> bool {
+    pub(super) fn step_combustible(&mut self, x: usize, y: usize, effective_temp: i16) -> bool {
         let i = self.idx(x, y);
         let material = self.grid[i];
         let Some((ignition_temperature, ignition_delay, burn_life)) = material.combustion() else {
             return false;
         };
-        let heat = self.effective_temp(x, y).max(0) as u16;
+        let heat = effective_temp.max(0) as u16;
 
         if heat < ignition_temperature {
             self.life[i] = 0;
@@ -129,7 +151,7 @@ impl World {
     }
 
     /// Soak heat into structural materials until they crack/melt into a product.
-    pub(super) fn step_melt(&mut self, x: usize, y: usize) -> bool {
+    pub(super) fn step_melt(&mut self, x: usize, y: usize, effective_temp: i16) -> bool {
         let i = self.idx(x, y);
         let material = self.grid[i];
         // Ice melting is handled in step_ice (contact + temperature).
@@ -139,7 +161,7 @@ impl World {
         let Some((melt_temp, delay, product)) = material.melt() else {
             return false;
         };
-        let heat = self.effective_temp(x, y).max(0) as u16;
+        let heat = effective_temp.max(0) as u16;
         if heat < melt_temp {
             self.life[i] = 0;
             return false;
@@ -200,11 +222,6 @@ impl World {
 
     pub(super) fn is_heated(&self, x: usize, y: usize) -> bool {
         self.effective_temp(x, y) >= 600
-            || self
-                .n8(x, y)
-                .into_iter()
-                .flatten()
-                .any(|(nx, ny)| matches!(self.grid[self.idx(nx, ny)], Fire | Lava | Ember))
     }
 
     pub(super) fn step_c4(&mut self, x: usize, y: usize) {
@@ -304,12 +321,19 @@ impl World {
             return;
         }
         self.life[i] = life;
+
+        // Apply vertical force (gravity) after lifecycle checks.
+        self.apply_vertical_force(i);
+
+        // Velocity-driven movement (Phase B).
+        if self.try_velocity_move(x, y) {
+            return;
+        }
+
         let passable = |m: Material| m.is_empty() || matches!(m, Smoke | Steam);
         let (d1, _) = self.dirs(x, y, 0x71);
         if self.chance(x, y, 0x72, 350) {
             let _ = self.try_step(x, y, d1, 1, passable);
-        } else if self.chance(x, y, 0x73, 250) {
-            let _ = self.try_step(x, y, 0, 1, passable);
         }
     }
 
@@ -327,12 +351,22 @@ impl World {
             return;
         }
 
-        let sink = |other| m.can_sink_into(other);
-        // Downward, with bounded per-material speed.
-        if self.try_fall(x, y, fall_speed_of(m), sink) {
+        // Apply vertical force (gravity) after lifecycle/reaction checks.
+        self.apply_vertical_force(i);
+        let has_vertical_step = self.has_vertical_step(i);
+
+        // --- Velocity-driven movement (Phase B) ---
+        // If the cell has stored velocity, trace the line using integer
+        // DDA so fast movement cannot tunnel through thin barriers.
+        if self.try_velocity_move(x, y) {
             return;
         }
-        // Diagonals
+        if !has_vertical_step {
+            return;
+        }
+
+        // Diagonal avalanche fallback after a downward collision.
+        let sink = |other| m.can_sink_into(other);
         let (d1, d2) = self.dirs(x, y, 0x10);
         for d in [d1, d2] {
             if let Some((tx, ty)) = self.adj(x, y, d, 1) {
@@ -357,7 +391,8 @@ impl World {
             return;
         }
 
-        // Lava and napalm are viscous; napalm also clings to solids.
+        // Sticky/viscous checks must occur before velocity movement so
+        // napalm/lava cadence remains effective.
         if matches!(m, Lava | Napalm) && !self.tick.is_multiple_of(2) {
             return;
         }
@@ -370,14 +405,22 @@ impl World {
             }
         }
 
+        // Apply vertical force (gravity) after lifecycle/reaction checks.
+        self.apply_vertical_force(i);
+        let has_vertical_step = self.has_vertical_step(i);
+
+        // --- Velocity-driven movement (Phase B) ---
+        if self.try_velocity_move(x, y) {
+            return;
+        }
+        if !has_vertical_step {
+            return;
+        }
+
         let sink = |other| m.can_sink_into(other);
         let rise = |t: Material| t.is_fluid() && m.density() < t.density();
 
-        // Downward, with bounded per-material speed.
-        if self.try_fall(x, y, fall_speed_of(m), sink) {
-            return;
-        }
-        // Diagonals
+        // Diagonal collision fallback.
         let (d1, d2) = self.dirs(x, y, 0x20);
         for d in [d1, d2] {
             if let Some((tx, ty)) = self.adj(x, y, d, 1) {
@@ -476,11 +519,21 @@ impl World {
             }
         }
 
-        let d = m.density();
-        let rise = |t: Material| t.is_empty() || (t.is_fluid() && d < t.density());
-        if self.try_step(x, y, 0, -1, rise) {
+        // --- Velocity-driven movement (Phase B) ---
+        // Apply vertical force (buoyancy) after lifecycle/reaction checks.
+        self.apply_vertical_force(i);
+        let has_vertical_step = self.has_vertical_step(i);
+
+        if self.try_velocity_move(x, y) {
             return;
         }
+        if !has_vertical_step {
+            return;
+        }
+
+        // Diagonal and horizontal ceiling-spread fallback.
+        let d = m.density();
+        let rise = |t: Material| t.is_empty() || (t.is_fluid() && d < t.density());
         let (d1, d2) = self.dirs(x, y, 0x30);
         if self.try_step(x, y, d1, -1, rise) {
             return;
@@ -510,36 +563,38 @@ impl World {
         }
         self.life[i] = life;
 
+        let mut has_air = false;
+        let mut oily = false;
+        let mut water = [0; 8];
+        let mut water_len = 0;
+        let mut extinguished = false;
+        for (nx, ny) in self.n8(x, y).into_iter().flatten() {
+            let ni = self.idx(nx, ny);
+            let other = self.grid[ni];
+            has_air |= matches!(other, Empty | Smoke | Steam | Fire) || other.flammable();
+            oily |= other.is_oily();
+            if other == Water {
+                water[water_len] = ni;
+                water_len += 1;
+            } else if other == LiquidNitrogen {
+                extinguished = true;
+            }
+        }
+
         // No oxygen: a flame fully boxed in by solids smothers into smoke.
         // Embers still smoulder without free air; only open flame is gated.
-        if !self.has_combustion_air(x, y) {
+        if !has_air {
             self.put(i, Smoke, rand_range(SMOKE_LIFE_MIN / 2, SMOKE_LIFE_MAX / 2));
             return;
         }
 
         // Oil/napalm fires shrug off water: water boils away, flame keeps burning.
-        let oily = self
-            .n8(x, y)
-            .into_iter()
-            .flatten()
-            .any(|(nx, ny)| self.grid[self.idx(nx, ny)].is_oily());
-
-        let mut extinguished = false;
-        for n in self.n8(x, y) {
-            let Some((nx, ny)) = n else {
-                continue;
-            };
-            let ni = self.idx(nx, ny);
-            let other = self.grid[ni];
-            if other == Water {
-                self.put(ni, Steam, rand_range(STEAM_LIFE_MIN, STEAM_LIFE_MAX));
-                if !oily {
-                    extinguished = true;
-                }
-                // greasy fires: water steams off without killing the flame
-            } else if other == LiquidNitrogen {
+        for &ni in &water[..water_len] {
+            self.put(ni, Steam, rand_range(STEAM_LIFE_MIN, STEAM_LIFE_MAX));
+            if !oily {
                 extinguished = true;
             }
+            // greasy fires: water steams off without killing the flame
         }
 
         if extinguished {
@@ -562,11 +617,17 @@ impl World {
         if !self.chance(x, y, 0x44, 600) {
             return;
         }
-        let passable = |t: Material| t.is_empty() || t == Smoke;
-        // Rising flame passes through smoke before trying to spread sideways.
-        if self.try_step(x, y, 0, -1, passable) {
+
+        self.apply_vertical_force(i);
+        let has_vertical_step = self.has_vertical_step(i);
+        if self.try_velocity_move(x, y) {
             return;
         }
+        if !has_vertical_step {
+            return;
+        }
+
+        let passable = |t: Material| t.is_empty() || t == Smoke;
         let (d1, d2) = self.dirs(x, y, 0x40);
         if self.try_step(x, y, d1, -1, passable) {
             return;
@@ -575,15 +636,6 @@ impl World {
             return;
         }
         let _ = self.try_step(x, y, d2, 0, passable);
-    }
-
-    /// Free air a flame can breathe: empty space, gaseous exhaust, or fuel it
-    /// is actively consuming. Fully boxed by inert solids smothers to smoke.
-    pub(super) fn has_combustion_air(&self, x: usize, y: usize) -> bool {
-        self.n8(x, y).into_iter().flatten().any(|(nx, ny)| {
-            let m = self.grid[self.idx(nx, ny)];
-            matches!(m, Empty | Smoke | Steam | Fire) || m.flammable()
-        })
     }
 
     /// Only `ASH_CHANCE` of cooled embers leave a residue of ash; the rest burn
@@ -637,17 +689,47 @@ impl World {
             return;
         }
 
+        // Apply vertical force (gravity) after lifecycle checks.
+        self.apply_vertical_force(i);
+
+        // Velocity-driven movement (Phase B).
+        if self.try_velocity_move(x, y) {
+            return;
+        }
+
         // Embers mostly burn out where they form instead of piling up as grit.
         if self.chance(x, y, 0x54, 100) {
             let sink = |other| Ember.can_sink_into(other);
-            if self.try_step(x, y, 0, 1, sink) {
-                return;
-            }
             let (d1, d2) = self.dirs(x, y, 0x50);
             if self.try_step(x, y, d1, 1, sink) {
                 return;
             }
             let _ = self.try_step(x, y, d2, 1, sink);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fling_outward_carries_velocity_and_clears_source() {
+        let mut world = World::new(7, 3);
+        world.paint(2, 1, Water);
+        world.set_velocity(2, 1, -3, 4);
+        let source = world.idx(2, 1);
+        world.vy_frac[source] = -2;
+        world.y_frac[source] = 3;
+
+        assert!(world.fling_outward(2, 1, 1, 0));
+        assert_eq!(world.get(2, 1), Empty);
+        assert_eq!(world.velocity_at(2, 1), (0, 0));
+        assert_eq!((world.vy_frac[source], world.y_frac[source]), (0, 0));
+        assert_eq!(world.get(4, 1), Water);
+        // Horizontal impulse changes vx; fixed vertical velocity remains 3.5.
+        assert_eq!(world.velocity_at(4, 1), (-1, 3));
+        let target = world.idx(4, 1);
+        assert_eq!((world.vy_frac[target], world.y_frac[target]), (2, 3));
     }
 }

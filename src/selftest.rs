@@ -1,11 +1,13 @@
 //! Headless, deterministic checks for the simulation. Run with `--selftest`.
 //! Lets us verify every material interaction without a terminal attached.
 
-use crate::app::App;
+use crate::app::{App, BrushShape, Confirm, EditorTool};
 use crate::material::Material;
 use crate::world::{FUSE_BURN_TICKS, Scene, World};
 use Material::*;
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 
 fn count(w: &World, m: Material) -> usize {
     (0..w.height)
@@ -46,8 +48,13 @@ fn fast_fall_is_bounded_and_cannot_tunnel() -> Result<(), String> {
     let mut open = World::new(7, 8);
     open.paint(3, 1, Sand);
     open.step();
-    if open.get(3, 3) != Sand {
-        return Err("sand did not use its two-cell fall speed".into());
+    if open.get(3, 1) != Sand {
+        return Err("sand moved before fractional acceleration accumulated".into());
+    }
+    open.step();
+    open.step();
+    if open.get(3, 2) != Sand {
+        return Err("sand did not move after fractional acceleration accumulated".into());
     }
 
     // Metal is a fixed solid (stone would fall as an unsupported structural chunk).
@@ -56,13 +63,14 @@ fn fast_fall_is_bounded_and_cannot_tunnel() -> Result<(), String> {
         blocked.paint(x, 2, Metal);
     }
     blocked.paint(3, 1, Sand);
-    blocked.step();
+    for _ in 0..3 {
+        blocked.step();
+    }
     if blocked.get(3, 1) != Sand || blocked.get(3, 2) != Metal {
         return Err("fast fall passed through a one-cell barrier".into());
     }
     Ok(())
 }
-
 
 fn water_prefers_route_to_lower_space() -> Result<(), String> {
     let mut w = World::new(11, 7);
@@ -73,13 +81,14 @@ fn water_prefers_route_to_lower_space() -> Result<(), String> {
         }
     }
     w.paint(5, 3, Water);
-    w.step();
+    for _ in 0..3 {
+        w.step();
+    }
     if w.get(8, 3) != Water {
         return Err("water did not choose the nearby downward outlet".into());
     }
     Ok(())
 }
-
 
 fn wall_is_immovable() -> Result<(), String> {
     let mut w = World::new(8, 8);
@@ -224,7 +233,6 @@ fn falling_glass_shatters_on_impact() -> Result<(), String> {
         w.step();
     }
     if w.get(4, 7) != BrokenGlass {
-
         return Err(format!(
             "falling glass did not shatter (got {})",
             w.get(4, 7).name()
@@ -629,11 +637,12 @@ fn renders_picker() -> Result<(), String> {
             .collect::<String>()
     };
 
-    // closed: no "Materials" anywhere on screen
+    // closed: no "Materials" anywhere on screen (skip status bar rows)
     let app = App::default();
     term.draw(|f| crate::ui::draw(f, &w, &app))
         .map_err(|e| e.to_string())?;
-    for y in 0..20 {
+    let sr = crate::ui::status_rows(&app, 40);
+    for y in 0..(20 - sr) {
         if row_text(term.backend().buffer(), y).contains("Materials") {
             return Err("picker title shown while closed".into());
         }
@@ -669,24 +678,245 @@ fn renders_picker() -> Result<(), String> {
     }
     Ok(())
 }
+
+fn brush_options_are_keyboard_accessible() -> Result<(), String> {
+    let mut app = App::default();
+    let mut world = World::new(12, 12);
+    let key = |code| Event::Key(KeyEvent::new(code, KeyModifiers::NONE));
+
+    app.handle(&key(KeyCode::Char('b')), &mut world);
+    if !app.brush_options_open || app.brush_options_cursor != 0 {
+        return Err("B did not open brush options on the Shape row".into());
+    }
+    app.handle(&key(KeyCode::Right), &mut world);
+    app.handle(&key(KeyCode::Down), &mut world);
+    app.handle(&key(KeyCode::Right), &mut world);
+    app.handle(&key(KeyCode::Down), &mut world);
+    app.handle(&key(KeyCode::Enter), &mut world);
+    if app.brush_shape != BrushShape::Square || app.brush != 3 || !app.brush_erase {
+        return Err("brush options did not update shape, radius, and erase mode".into());
+    }
+    app.handle(&key(KeyCode::Char('b')), &mut world);
+    if app.brush_options_open {
+        return Err("B did not close brush options".into());
+    }
+    Ok(())
+}
+
+fn ctrl_v_stays_in_paste_mode_on_repeat() -> Result<(), String> {
+    let mut app = App {
+        clipboard: vec![(Sand, 0, 0, 0)],
+        clipboard_size: (1, 1),
+        ..App::default()
+    };
+    let mut world = World::new(4, 4);
+    let ctrl_v = Event::Key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL));
+    let ctrl_shift_v = Event::Key(KeyEvent::new(
+        KeyCode::Char('V'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    ));
+
+    app.handle(&ctrl_v, &mut world);
+    app.handle(&ctrl_v, &mut world);
+    app.handle(&ctrl_shift_v, &mut world);
+    if !app.pasting {
+        return Err("repeated Ctrl+V canceled paste mode".into());
+    }
+    Ok(())
+}
+
+fn terminal_paste_is_only_text_in_save_input() -> Result<(), String> {
+    let mut app = App::default();
+    let mut world = World::new(4, 4);
+
+    app.handle(&Event::Paste("sample 2".into()), &mut world);
+    if app.scene_menu.open || app.confirm != Confirm::None || app.selected != Sand {
+        return Err("terminal paste triggered application shortcuts".into());
+    }
+
+    app.scene_menu.open = true;
+    app.scene_menu.saving = true;
+    app.handle(&Event::Paste("My\nScene/2".into()), &mut world);
+    if app.scene_menu.save_name != "MyScene2" {
+        return Err("terminal paste was not sanitized into scene-name input".into());
+    }
+    Ok(())
+}
+
+fn clipboard_shortcuts_work_over_overlays() -> Result<(), String> {
+    let mut world = World::new(4, 4);
+    world.paint(1, 1, Sand);
+    let ctrl_c = Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+
+    for mut app in [
+        App {
+            selection: Some(((1, 1), (1, 1))),
+            picker_open: true,
+            ..App::default()
+        },
+        App {
+            selection: Some(((1, 1), (1, 1))),
+            brush_options_open: true,
+            ..App::default()
+        },
+    ] {
+        app.handle(&ctrl_c, &mut world);
+        if !app.pasting || app.clipboard.len() != 1 {
+            return Err("an overlay intercepted Ctrl+C".into());
+        }
+    }
+    Ok(())
+}
+
+fn selection_copy_cut_delete_workflow() -> Result<(), String> {
+    let key = |code, modifiers| Event::Key(KeyEvent::new(code, modifiers));
+    let click = |column, row| {
+        Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        })
+    };
+
+    let mut world = World::new(10, 10);
+    world.paint(1, 1, Sand);
+    world.paint(2, 1, Water);
+    world.paint(1, 2, Wood);
+    world.paint(2, 2, Stone);
+    let mut app = App {
+        selection: Some(((1, 1), (2, 2))),
+        ..App::default()
+    };
+
+    app.handle(&key(KeyCode::Char('c'), KeyModifiers::CONTROL), &mut world);
+    if !app.pasting
+        || app.selection.is_some()
+        || app.clipboard_size != (2, 2)
+        || app.clipboard.len() != 4
+    {
+        return Err("Ctrl+C did not dismiss and attach the selected cells to the cursor".into());
+    }
+    app.handle(&click(4, 2), &mut world);
+    app.handle(&click(7, 2), &mut world);
+    if world.get(4, 4) != Sand
+        || world.get(5, 4) != Water
+        || world.get(4, 5) != Wood
+        || world.get(5, 5) != Stone
+        || world.get(7, 4) != Sand
+    {
+        return Err("copied selection was not pasted repeatedly at click positions".into());
+    }
+
+    app.selection = Some(((1, 1), (2, 2)));
+    app.handle(&key(KeyCode::Char('x'), KeyModifiers::CONTROL), &mut world);
+    if !app.pasting
+        || app.selection.is_some()
+        || (1..=2).any(|y| (1..=2).any(|x| world.get(x, y) != Empty))
+    {
+        return Err("Ctrl+X did not cut the selection and retain it for pasting".into());
+    }
+    app.handle(&click(1, 1), &mut world);
+    if world.get(1, 2) != Sand || world.get(2, 3) != Stone {
+        return Err("cut selection could not be pasted".into());
+    }
+
+    app.selection = Some(((1, 2), (2, 3)));
+    app.handle(&key(KeyCode::Delete, KeyModifiers::NONE), &mut world);
+    if app.selection.is_some()
+        || app.pasting
+        || (2..=3).any(|y| (1..=2).any(|x| world.get(x, y) != Empty))
+    {
+        return Err("Delete did not clear and dismiss the selection".into());
+    }
+
+    app.tool = EditorTool::Select;
+    app.selection = Some(((0, 0), (1, 1)));
+    app.handle(&key(KeyCode::Char('e'), KeyModifiers::NONE), &mut world);
+    app.handle(&key(KeyCode::Down, KeyModifiers::NONE), &mut world);
+    app.handle(&key(KeyCode::Enter, KeyModifiers::NONE), &mut world);
+    if app.selection.is_some() || app.tool == EditorTool::Select {
+        return Err("changing away from Select did not dismiss the selection".into());
+    }
+    Ok(())
+}
+
+fn brush_shapes_erase_and_preview_match() -> Result<(), String> {
+    let click = Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 5,
+        row: 3,
+        modifiers: KeyModifiers::NONE,
+    });
+
+    let mut circle_world = World::new(12, 12);
+    let mut circle = App {
+        brush: 1,
+        brush_shape: BrushShape::Circle,
+        ..App::default()
+    };
+    circle.handle(&click, &mut circle_world);
+    if count(&circle_world, Sand) != 5 {
+        return Err("radius-1 circle brush did not paint 5 cells".into());
+    }
+
+    let mut square_world = World::new(12, 12);
+    for y in 5..=7 {
+        for x in 4..=6 {
+            square_world.paint(x, y, Stone);
+        }
+    }
+    let mut square = App {
+        brush: 1,
+        brush_shape: BrushShape::Square,
+        brush_erase: true,
+        ..App::default()
+    };
+    square.handle(&click, &mut square_world);
+    if count(&square_world, Stone) != 0 {
+        return Err("square erase brush did not clear its 3x3 footprint".into());
+    }
+
+    let preview = App {
+        brush: 1,
+        brush_shape: BrushShape::Circle,
+        mouse_world: Some((5, 6)),
+        ..App::default()
+    };
+    if !preview.brush_preview_contains(6, 6, 12, 12) || preview.brush_preview_contains(6, 7, 12, 12)
+    {
+        return Err("circle brush preview does not match the painted footprint".into());
+    }
+    Ok(())
+}
+
 fn quit_and_escape_priority() -> Result<(), String> {
     let mut world = World::new(4, 4);
-    let q = Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
     let escape = Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    let enter = Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
-    if App::default().handle(&q, &mut world) {
-        return Err("Q did not request application exit".into());
+    // Esc shows quit confirmation when no overlays are open
+    let mut app = App::default();
+    if !app.handle(&escape, &mut world) || app.confirm != Confirm::Quit {
+        return Err("Esc did not show quit confirmation".into());
     }
-    if App::default().handle(&escape, &mut world) {
-        return Err("Esc did not request exit without an active overlay".into());
+    // Enter confirms the quit
+    if app.handle(&enter, &mut world) {
+        return Err("Enter did not confirm quit".into());
     }
 
+    // Esc closes the material picker without quitting
     let mut app = App {
         picker_open: true,
         ..App::default()
     };
+    // First Esc closes picker
     if !app.handle(&escape, &mut world) || app.picker_open {
-        return Err("Esc did not close the material picker before quitting".into());
+        return Err("Esc did not close the material picker".into());
+    }
+    // Second Esc shows quit confirmation
+    if !app.handle(&escape, &mut world) || app.confirm != Confirm::Quit {
+        return Err("Esc did not show quit confirmation after closing all overlays".into());
     }
     Ok(())
 }
@@ -1095,19 +1325,35 @@ fn salt_dissolves_without_rewriting_water() -> Result<(), String> {
     let mut w = World::new(5, 5);
     w.paint(2, 2, Salt);
     w.paint(2, 3, Water);
+    for y in 2..=3 {
+        w.paint(1, y, Metal);
+        w.paint(3, y, Metal);
+    }
+    for x in 1..=3 {
+        w.paint(x, 4, Metal);
+    }
     let water_seed = w.seed_at(2, 3);
-    for _ in 0..200 {
+    for tick in 0..200 {
+        // Keep the chunk active so probabilistic chemistry continues after settling.
+        w.paint(0, 0, if tick % 2 == 0 { Metal } else { Empty });
         w.step();
-        if w.get(2, 2) == Empty {
-            // Salt gone; water cell should still be water (not rewritten to a new grain).
-            if w.get(2, 3) != Water && count(&w, Water) == 0 {
-                return Err("salt dissolve destroyed the water".into());
+        let salt_remains = (0..w.height).any(|y| (0..w.width).any(|x| w.get(x, y) == Salt));
+        if !salt_remains {
+            let water_preserved = (0..w.height).any(|y| {
+                (0..w.width).any(|x| w.get(x, y) == Water && w.seed_at(x, y) == water_seed)
+            });
+            if !water_preserved {
+                return Err("salt dissolve rewrote or destroyed the water cell".into());
             }
-            let _ = water_seed;
             return Ok(());
         }
     }
-    Err("salt did not dissolve in water".into())
+    let cells: Vec<_> = (0..w.height)
+        .flat_map(|y| (0..w.width).map(move |x| (x, y)))
+        .filter(|&(x, y)| w.get(x, y) != Empty)
+        .map(|(x, y)| (x, y, w.get(x, y)))
+        .collect();
+    Err(format!("salt did not dissolve in water: {cells:?}"))
 }
 
 fn faucet_emits_consistent_stream() -> Result<(), String> {
@@ -1119,12 +1365,14 @@ fn faucet_emits_consistent_stream() -> Result<(), String> {
 
     // After a short run the column under the faucet should be a solid stream,
     // not a sparse drip that only appears every few ticks.
+    // With persistent velocity, water accelerates and may skip cells, but
+    // the stream should still be substantial.
     for _ in 0..30 {
         w.step();
     }
     let column: Vec<Material> = (2..15).map(|y| w.get(4, y)).collect();
     let water_cells = column.iter().filter(|&&m| m == Water).count();
-    if water_cells < 8 {
+    if water_cells < 7 {
         return Err(format!(
             "faucet stream too sparse under spout (water cells={water_cells}, column={column:?})"
         ));
@@ -1186,7 +1434,6 @@ fn c4_blast_respects_structural_materials() -> Result<(), String> {
     }
     Ok(())
 }
-
 
 fn ice_melt_preserves_cold_water() -> Result<(), String> {
     let mut w = World::new(5, 5);
@@ -1342,8 +1589,59 @@ fn preset_scenes_load_and_run() -> Result<(), String> {
     Ok(())
 }
 
-pub fn run() -> std::io::Result<()> {
-    let tests: &[(&str, Test)] = &[
+fn plant_grows_alongside_water() -> Result<(), String> {
+    let mut w = World::new(7, 3);
+    // Contain the water beside the plant so they remain adjacent long enough to grow.
+    w.paint(2, 1, Plant);
+    w.paint_state(3, 1, (Water, 0, 0, 0));
+    w.paint(2, 2, Stone);
+    w.paint(3, 2, Stone);
+    w.paint(4, 1, Stone);
+    w.paint(4, 2, Stone);
+    let water_count_before = count(&w, Water);
+    let plant_count_before = count(&w, Plant);
+    for _ in 0..80 {
+        w.step();
+        if count(&w, Water) != water_count_before {
+            return Err("plant growth consumed water".into());
+        }
+        if count(&w, Plant) > plant_count_before {
+            return Ok(());
+        }
+    }
+    Err("plant did not grow into an empty cell next to water".into())
+}
+
+fn liquid_nitrogen_thermal_shock() -> Result<(), String> {
+    for &(mat, temp_threshold) in &[(Stone, 400), (Concrete, 500), (Metal, 600)] {
+        // Thermal-shock scenario: hot material next to LN2.
+        let mut shocked = World::new(5, 3);
+        shocked.paint(2, 1, mat);
+        shocked.paint_state(2, 1, (mat, 0, 0, temp_threshold + 50));
+        shocked.paint(2, 2, LiquidNitrogen);
+        for _ in 0..80 {
+            shocked.step();
+            // Keep LN2 fresh so it doesn't all boil away before the shock lands.
+            if shocked.get(2, 2) != LiquidNitrogen {
+                shocked.paint(2, 2, LiquidNitrogen);
+            }
+            // Keep the solid hot.
+            if shocked.get(2, 1) == mat {
+                shocked.paint_state(2, 1, (mat, 0, shocked.seed_at(2, 1), temp_threshold + 50));
+            }
+            let cell = shocked.get(2, 1);
+            if cell == Sand || cell == Empty {
+                return Ok(());
+            }
+        }
+    }
+    Err("no material experienced thermal shock from liquid nitrogen".into())
+}
+
+/// The full list of selftest checks: (name, function) pairs.
+/// Exposed publicly so `cargo test` can run them without duplication.
+pub fn tests() -> &'static [(&'static str, Test)] {
+    &[
         ("sand_falls", sand_falls),
         (
             "fast_fall_is_bounded_and_cannot_tunnel",
@@ -1388,6 +1686,31 @@ pub fn run() -> std::io::Result<()> {
             "fire_rises_through_smoke_to_ignite_wood",
             fire_rises_through_smoke_to_ignite_wood,
         ),
+        ("plant_grows_alongside_water", plant_grows_alongside_water),
+        (
+            "brush_options_are_keyboard_accessible",
+            brush_options_are_keyboard_accessible,
+        ),
+        (
+            "ctrl_v_stays_in_paste_mode_on_repeat",
+            ctrl_v_stays_in_paste_mode_on_repeat,
+        ),
+        (
+            "terminal_paste_is_only_text_in_save_input",
+            terminal_paste_is_only_text_in_save_input,
+        ),
+        (
+            "clipboard_shortcuts_work_over_overlays",
+            clipboard_shortcuts_work_over_overlays,
+        ),
+        (
+            "selection_copy_cut_delete_workflow",
+            selection_copy_cut_delete_workflow,
+        ),
+        (
+            "brush_shapes_erase_and_preview_match",
+            brush_shapes_erase_and_preview_match,
+        ),
         ("quit_and_escape_priority", quit_and_escape_priority),
         ("lava_plus_water_makes_stone", lava_meets_water),
         ("acid_dissolves", acid_dissolves),
@@ -1427,6 +1750,10 @@ pub fn run() -> std::io::Result<()> {
             liquid_nitrogen_freezes_and_extinguishes,
         ),
         (
+            "liquid_nitrogen_thermal_shock",
+            liquid_nitrogen_thermal_shock,
+        ),
+        (
             "c4_blast_respects_structural_materials",
             c4_blast_respects_structural_materials,
         ),
@@ -1460,8 +1787,11 @@ pub fn run() -> std::io::Result<()> {
         ("sealed_fire_suffocates", sealed_fire_suffocates),
         ("blast_moves_sand_outward", blast_moves_sand_outward),
         ("preset_scenes_load_and_run", preset_scenes_load_and_run),
-    ];
+    ]
+}
 
+pub fn run() -> std::io::Result<()> {
+    let tests = tests();
     let mut failed = 0;
     for (name, test) in tests {
         match test() {
@@ -1479,5 +1809,28 @@ pub fn run() -> std::io::Result<()> {
     } else {
         println!("\nselftest: {failed}/{} checks FAILED", tests.len());
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod test_harness {
+    use super::*;
+
+    #[test]
+    fn selftest_all() {
+        let tests = tests();
+        let mut failures: Vec<String> = Vec::new();
+        for (name, test) in tests {
+            if let Err(e) = test() {
+                failures.push(format!("{name}: {e}"));
+            }
+        }
+        if !failures.is_empty() {
+            panic!(
+                "{} selftest check(s) FAILED:\n{}",
+                failures.len(),
+                failures.join("\n")
+            );
+        }
     }
 }

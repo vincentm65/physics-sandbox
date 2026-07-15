@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear},
 };
 
-use crate::app::{App, EditorTool};
+use crate::app::{App, Confirm, EditorTool};
 use crate::material::Material;
 use crate::world::World;
 
@@ -14,8 +14,13 @@ use crate::world::World;
 /// material-picker overlay.
 pub fn draw(frame: &mut Frame, world: &World, app: &App) {
     let area = frame.area();
-    draw_grid(frame, world, app, &area);
-    draw_status(frame, app, &area);
+    let sr = status_rows(app, area.width);
+    let grid_area = Rect::new(area.x, area.y, area.width, area.height.saturating_sub(sr));
+    draw_grid(frame, world, app, &grid_area);
+    draw_status(frame, app, &area, sr);
+    if app.brush_options_open {
+        draw_brush_options(frame, &area, app);
+    }
     if app.tool_picker_open {
         draw_tool_picker(frame, &area, app);
     }
@@ -25,12 +30,24 @@ pub fn draw(frame: &mut Frame, world: &World, app: &App) {
     if app.scene_menu.open {
         draw_scene_menu(frame, &area, app);
     }
+    // Confirmation dialog drawn last (on top).
+    if app.confirm != Confirm::None {
+        draw_confirmation(frame, &area, app);
+    }
 }
 
 fn draw_grid(frame: &mut Frame, world: &World, app: &App, area: &Rect) {
     let buf = frame.buffer_mut();
-    let grid_rows = (area.height as usize).saturating_sub(1);
+    let grid_rows = area.height as usize;
     let tick = world.tick();
+    let preview_color = app.preview_color(tick);
+    let line_preview = app.line_preview_cells();
+    let shape_preview_contains = |x, y| {
+        line_preview.as_ref().map_or_else(
+            || app.preview_contains(x, y),
+            |cells| cells.contains(&(x, y)),
+        )
+    };
     for cy in 0..grid_rows {
         for cx in 0..area.width as usize {
             let (wx, top_y, bottom_y) = if app.zoom == 2 {
@@ -50,7 +67,8 @@ fn draw_grid(frame: &mut Frame, world: &World, app: &App, area: &Rect) {
             let Some(cell) = cell else {
                 continue;
             };
-            let skip = wx < 0 || top_y < 0 || wx as usize >= world.width || top_y as usize >= world.height;
+            let skip =
+                wx < 0 || top_y < 0 || wx as usize >= world.width || top_y as usize >= world.height;
             let skip = skip || bottom_y.is_some_and(|by| by < 0 || by as usize >= world.height);
             if skip {
                 continue;
@@ -59,24 +77,17 @@ fn draw_grid(frame: &mut Frame, world: &World, app: &App, area: &Rect) {
             let top_color = ghost_top
                 .map(|(material, life, seed, _)| material.color(seed, life, tick))
                 .unwrap_or_else(|| {
-                    let top = world.get(wx as usize, top_y as usize);
-                    top.color(
-                        world.seed_at(wx as usize, top_y as usize),
-                        world.life_at(wx as usize, top_y as usize),
-                        tick,
-                    )
+                    let (material, seed, life) = world.render_state(wx as usize, top_y as usize);
+                    material.color(seed, life, tick)
                 });
             if let Some(bottom_y) = bottom_y {
                 let ghost_bottom = app.paste_ghost_at(wx, bottom_y, world.width, world.height);
                 let bottom_color = ghost_bottom
                     .map(|(material, life, seed, _)| material.color(seed, life, tick))
                     .unwrap_or_else(|| {
-                        let bottom = world.get(wx as usize, bottom_y as usize);
-                        bottom.color(
-                            world.seed_at(wx as usize, bottom_y as usize),
-                            world.life_at(wx as usize, bottom_y as usize),
-                            tick,
-                        )
+                        let (material, seed, life) =
+                            world.render_state(wx as usize, bottom_y as usize);
+                        material.color(seed, life, tick)
                     });
                 cell.set_char('▀');
                 cell.set_fg(top_color);
@@ -85,54 +96,141 @@ fn draw_grid(frame: &mut Frame, world: &World, app: &App, area: &Rect) {
                 cell.set_char(' ');
                 cell.set_bg(top_color);
             }
-            let selected = app.preview_contains(wx, top_y) || app.selection_contains(wx, top_y);
-            let selected_bottom = bottom_y
-                .is_some_and(|y| app.preview_contains(wx, y) || app.selection_contains(wx, y));
+            let brush_preview = app.brush_preview_contains(wx, top_y, world.width, world.height);
+            let shape_preview = app.tool != EditorTool::Select && shape_preview_contains(wx, top_y);
+            let selected = brush_preview || shape_preview;
+            let selected_bottom = bottom_y.is_some_and(|y| {
+                app.brush_preview_contains(wx, y, world.width, world.height)
+                    || (app.tool != EditorTool::Select && shape_preview_contains(wx, y))
+            });
             if selected {
                 if app.zoom == 2 {
-                    cell.set_bg(Color::Rgb(255, 255, 255));
+                    cell.set_bg(preview_color);
                 } else {
-                    cell.set_fg(Color::Rgb(255, 255, 255));
+                    cell.set_fg(preview_color);
                 }
             }
             if selected_bottom {
-                cell.set_bg(Color::Rgb(255, 255, 255));
+                cell.set_bg(preview_color);
+            }
+
+            let selection_top = app.selection_contains(wx, top_y)
+                || (app.tool == EditorTool::Select && shape_preview_contains(wx, top_y));
+            let selection_bottom = bottom_y.is_some_and(|y| {
+                app.selection_contains(wx, y)
+                    || (app.tool == EditorTool::Select && shape_preview_contains(wx, y))
+            });
+            if selection_top {
+                if app.zoom == 2 {
+                    cell.set_bg(Color::White);
+                } else {
+                    cell.set_fg(Color::White);
+                }
+            }
+            if selection_bottom {
+                cell.set_bg(Color::White);
             }
         }
     }
 }
 
-fn draw_status(frame: &mut Frame, app: &App, area: &Rect) {
+/// Build the unified status text (without rendering it).
+fn status_text(app: &App) -> String {
+    let erase = if app.brush_erase { " · Erase" } else { "" };
+    let mirror = app
+        .mirror
+        .map(|axis| format!(" · {}", axis.name()))
+        .unwrap_or_default();
+    let dirty = if app.dirty { " ●" } else { "" };
+    let paused = if app.paused { "Paused" } else { "Running" };
+    let coords = app
+        .mouse_world
+        .map(|(x, y)| format!(" · {x},{y}"))
+        .unwrap_or_default();
+    let controls = if app.pasting {
+        "Click Paste · Esc Cancel"
+    } else if app.selection.is_some() {
+        "Ctrl+C Copy · Ctrl+X Cut · Del Delete · Esc Brush"
+    } else {
+        "Tab Materials · E Tools · B Brush · S Scenes · Space Pause · Wheel Zoom · Esc Quit"
+    };
+    format!(
+        "  ▀ {} · {} {} r{}{}{} · {}{} · {}{}  │  {}",
+        app.selected.name(),
+        app.tool.name(),
+        app.brush_shape.name(),
+        app.brush,
+        erase,
+        mirror,
+        app.scene_name,
+        dirty,
+        paused,
+        coords,
+        controls,
+    )
+}
+
+/// How many terminal rows the status bar needs (capped at 3).
+pub(crate) fn status_rows(app: &App, terminal_width: u16) -> u16 {
+    let w = terminal_width.max(1) as usize;
+    let chars = status_text(app).chars().count();
+    let needed = chars.div_ceil(w);
+    (needed as u16).clamp(1, 3)
+}
+
+fn draw_status(frame: &mut Frame, app: &App, area: &Rect, status_rows: u16) {
     let buf = frame.buffer_mut();
-    let sy = area.y + area.height - 1;
     let bg = Color::Rgb(16, 18, 26);
     let fg = Color::Rgb(210, 214, 224);
     let accent = Color::Rgb(255, 220, 120);
+    let width = area.width as usize;
 
-    // fill the row's background
-    for x in 0..area.width {
-        if let Some(cell) = buf.cell_mut((area.x + x, sy)) {
-            cell.set_char(' ');
-            cell.set_bg(bg);
+    let base_y = area.y + area.height - status_rows;
+
+    // fill status rows with background
+    for row in 0..status_rows {
+        let sy = base_y + row;
+        for x in 0..area.width {
+            if let Some(cell) = buf.cell_mut((area.x + x, sy)) {
+                cell.set_char(' ');
+                cell.set_bg(bg);
+            }
         }
     }
-    let name = app.selected.name();
-    let tool = app.tool.name();
-    let mirror = app.mirror.map(|axis| axis.name()).unwrap_or_default();
-    let paused = if app.paused { " ‖" } else { "" };
-    let paste = if app.pasting { " PASTE" } else { "" };
-    let scene = app.scene.name();
-    let s = format!(
-        "  ▀ {name}   {tool}   Brush:{}/8   {mirror}   {scene}{paused}{paste}   Z=Zoom  Pan=drag  H/V=Mirror  E=Tools  S=Scenes",
-        app.brush,
-    );
 
+    // Status message takes priority if active.
+    if let Some(msg) = &app.status_msg {
+        let msg_color = if msg.starts_with("Error: ") {
+            Color::Rgb(255, 120, 100)
+        } else {
+            Color::Rgb(120, 255, 160)
+        };
+        let sy = base_y; // message always fits one row
+        for (i, ch) in msg.chars().enumerate() {
+            let x = area.x + i as u16;
+            if x >= area.x + area.width {
+                break;
+            }
+            if let Some(cell) = buf.cell_mut((x, sy)) {
+                cell.set_char(ch);
+                cell.set_fg(msg_color);
+                cell.set_bg(bg);
+            }
+        }
+        return;
+    }
+
+    let s = status_text(app);
+
+    // print wrapped text across status_rows
     for (i, ch) in s.chars().enumerate() {
-        let x = area.x + i as u16;
-        if x >= area.x + area.width {
+        let row = i / width;
+        if row >= status_rows as usize {
             break;
         }
-        if let Some(cell) = buf.cell_mut((x, sy)) {
+        let x = area.x + (i % width) as u16;
+        let y = base_y + row as u16;
+        if let Some(cell) = buf.cell_mut((x, y)) {
             cell.set_char(ch);
             cell.set_fg(fg);
             cell.set_bg(bg);
@@ -142,9 +240,11 @@ fn draw_status(frame: &mut Frame, app: &App, area: &Rect) {
     // tint the swatch ▀ (col 2) with the selected material's colour, and the
     // name with the accent colour so the active material pops.
     let swatch_col = app.selected.color(0, 128, 0);
+    let sy = base_y; // first status row
     if let Some(cell) = buf.cell_mut((area.x + 2, sy)) {
         cell.set_fg(swatch_col);
     }
+    let name = app.selected.name();
     for (k, _) in name.chars().enumerate() {
         if let Some(cell) = buf.cell_mut((area.x + 4 + k as u16, sy)) {
             cell.set_fg(accent);
@@ -152,6 +252,89 @@ fn draw_status(frame: &mut Frame, app: &App, area: &Rect) {
     }
 }
 
+pub fn brush_options_rect(w: u16, h: u16) -> Rect {
+    let width = 46.min(w.saturating_sub(2));
+    let height = 5.min(h);
+    Rect::new(
+        w.saturating_sub(width) / 2,
+        h.saturating_sub(height) / 2,
+        width,
+        height,
+    )
+}
+
+fn draw_brush_options(frame: &mut Frame, area: &Rect, app: &App) {
+    let popup = brush_options_rect(area.width, area.height);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Brush Options — ←→ change, B/Esc close ")
+            .style(
+                Style::default()
+                    .fg(Color::Rgb(210, 214, 224))
+                    .bg(Color::Rgb(18, 20, 30)),
+            ),
+        popup,
+    );
+
+    let rows = [
+        ("Shape", app.brush_shape.name().to_string()),
+        (
+            "Radius",
+            format!(
+                "{} ({}×{})",
+                app.brush,
+                app.brush * 2 + 1,
+                app.brush * 2 + 1
+            ),
+        ),
+        (
+            "Erase",
+            if app.brush_erase { "On" } else { "Off" }.to_string(),
+        ),
+    ];
+    let buf = frame.buffer_mut();
+    let base_bg = Color::Rgb(18, 20, 30);
+    let hi_bg = Color::Rgb(44, 48, 66);
+    let accent = Color::Rgb(255, 220, 120);
+    let inner_w = popup.width.saturating_sub(2);
+
+    for (index, (label, value)) in rows.iter().enumerate() {
+        let y = popup.y + 1 + index as u16;
+        if y >= popup.y + popup.height.saturating_sub(1) {
+            break;
+        }
+        let selected = index == app.brush_options_cursor;
+        let bg = if selected { hi_bg } else { base_bg };
+        for dx in 0..inner_w {
+            if let Some(cell) = buf.cell_mut((popup.x + 1 + dx, y)) {
+                cell.set_bg(bg);
+            }
+        }
+        putc(
+            buf,
+            popup.x + 1,
+            y,
+            if selected { '▶' } else { ' ' },
+            accent,
+            bg,
+        );
+        for (offset, ch) in format!("{label:<8} {value}").chars().enumerate() {
+            if offset as u16 >= inner_w.saturating_sub(2) {
+                break;
+            }
+            putc(
+                buf,
+                popup.x + 3 + offset as u16,
+                y,
+                ch,
+                Color::Rgb(210, 214, 224),
+                bg,
+            );
+        }
+    }
+}
 
 pub fn tool_picker_rect(w: u16, h: u16) -> Rect {
     let width = 26.min(w.saturating_sub(2));
@@ -223,6 +406,25 @@ pub fn picker_rect(w: u16, h: u16) -> Rect {
     Rect::new(x, y, pw, ph)
 }
 
+fn list_offset(cursor: usize, total: usize, visible: usize) -> usize {
+    if visible == 0 || total <= visible {
+        0
+    } else {
+        cursor
+            .saturating_add(1)
+            .saturating_sub(visible)
+            .min(total - visible)
+    }
+}
+
+pub(crate) fn picker_scroll_offset(cursor: usize, popup_height: u16) -> usize {
+    list_offset(
+        cursor,
+        Material::ALL.len(),
+        popup_height.saturating_sub(2) as usize,
+    )
+}
+
 fn draw_picker(frame: &mut Frame, area: &Rect, app: &App) {
     let popup = picker_rect(area.width, area.height);
 
@@ -249,8 +451,16 @@ fn draw_picker(frame: &mut Frame, area: &Rect, app: &App) {
     let inner_x = popup.x + 1;
     let inner_w = popup.width.saturating_sub(2);
 
-    for (i, &m) in Material::ALL.iter().enumerate() {
-        let y = popup.y + 1 + i as u16;
+    let visible = popup.height.saturating_sub(2) as usize;
+    let offset = picker_scroll_offset(app.picker_cursor, popup.height);
+    for (row, (i, &m)) in Material::ALL
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(visible)
+        .enumerate()
+    {
+        let y = popup.y + 1 + row as u16;
         let selected = i == app.picker_cursor;
 
         // row background
@@ -311,13 +521,17 @@ fn putc(buf: &mut Buffer, x: u16, y: u16, ch: char, fg: Color, bg: Color) {
 
 /// Centred rect for the scene popup, clamped to the terminal.
 pub fn scene_menu_rect(w: u16, h: u16) -> Rect {
-    let pw: u16 = 36;
+    let pw: u16 = 44;
     let ph: u16 = 14;
     let pw = pw.min(w.saturating_sub(2));
     let ph = ph.min(h.saturating_sub(2));
     let x = w.saturating_sub(pw) / 2;
     let y = h.saturating_sub(ph) / 2;
     Rect::new(x, y, pw, ph)
+}
+
+pub(crate) fn scene_scroll_offset(cursor: usize, total: usize, popup_height: u16) -> usize {
+    list_offset(cursor, total, popup_height.saturating_sub(4) as usize)
 }
 
 /// Draw the scene management popup menu.
@@ -328,7 +542,7 @@ fn draw_scene_menu(frame: &mut Frame, area: &Rect, app: &App) {
     frame.render_widget(Clear, popup);
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Scenes — ↑↓ nav  L=Load  D=Delete  A=Add/Rename  S=Save  Esc=Close ")
+        .title(" Scenes ")
         .style(
             Style::default()
                 .fg(Color::Rgb(210, 214, 224))
@@ -346,59 +560,50 @@ fn draw_scene_menu(frame: &mut Frame, area: &Rect, app: &App) {
     let inner_x = popup.x + 1;
     let inner_w = popup.width.saturating_sub(2);
 
-    // Scene list area: rows 1..=8 (8 items max visible)
-    let list_start = 1;
-    let list_end = 8;
     let scenes = &app.scene_menu.scenes;
     let cursor = app.scene_menu.cursor;
+    let visible = popup.height.saturating_sub(4) as usize;
+    let offset = scene_scroll_offset(cursor, scenes.len(), popup.height);
 
     if scenes.is_empty() {
-        let msg = "No scenes yet (A=Add)";
+        let msg = "No saved scenes";
         let msg_x = inner_x + (inner_w.saturating_sub(msg.len() as u16)) / 2;
         for (k, ch) in msg.chars().enumerate() {
-            let x = msg_x + k as u16;
-            putc(
-                buf,
-                x,
-                popup.y + 4,
-                ch,
-                if k < 9 { accent } else { dim },
-                base_bg,
-            );
+            putc(buf, msg_x + k as u16, popup.y + 3, ch, dim, base_bg);
         }
     } else {
-        for i in 0..(list_end - list_start + 1) {
-            let idx: usize = i;
-            if idx >= scenes.len() {
-                break;
-            }
-            let y = popup.y + list_start as u16 + i as u16;
+        for (row, (idx, scene_name)) in scenes
+            .iter()
+            .enumerate()
+            .skip(offset)
+            .take(visible)
+            .enumerate()
+        {
+            let y = popup.y + 1 + row as u16;
             let selected = idx == cursor;
-            let scene_name = &scenes[idx];
 
-            // row background
             for dx in 0..inner_w {
                 if let Some(cell) = buf.cell_mut((inner_x + dx, y)) {
                     cell.set_bg(if selected { hi_bg } else { base_bg });
                 }
             }
 
-            // cursor marker
             putc(
                 buf,
                 inner_x,
                 y,
                 if selected { '▶' } else { ' ' },
                 accent,
-                base_bg,
+                if selected { hi_bg } else { base_bg },
             );
 
-            // scene name
-            let name_x = inner_x + 2;
             for (k, ch) in scene_name.chars().enumerate() {
+                if k as u16 >= inner_w.saturating_sub(2) {
+                    break;
+                }
                 putc(
                     buf,
-                    name_x + k as u16,
+                    inner_x + 2 + k as u16,
                     y,
                     ch,
                     if selected {
@@ -406,21 +611,33 @@ fn draw_scene_menu(frame: &mut Frame, area: &Rect, app: &App) {
                     } else {
                         Color::Rgb(210, 214, 224)
                     },
-                    base_bg,
+                    if selected { hi_bg } else { base_bg },
                 );
             }
         }
     }
 
-    // Action hints at the bottom
-    let hint_y = popup.y + list_end as u16 + 1;
-    let hints = " L=Load  D=Delete  A=Add  R=Rename  S=Save(overwrite)  ";
-    for (k, ch) in hints.chars().enumerate() {
-        let x = inner_x + k as u16;
-        if x >= inner_x + inner_w {
-            break;
+    let hint_y = popup.y + popup.height.saturating_sub(3);
+    for (line, hints) in [
+        "↑↓ Navigate  Enter Load  A New  R Save copy",
+        "D Delete  Shift+S Overwrite  Esc Close",
+    ]
+    .iter()
+    .enumerate()
+    {
+        for (k, ch) in hints.chars().enumerate() {
+            if k as u16 >= inner_w {
+                break;
+            }
+            putc(
+                buf,
+                inner_x + k as u16,
+                hint_y + line as u16,
+                ch,
+                dim,
+                base_bg,
+            );
         }
-        putc(buf, x, hint_y, ch, dim, base_bg);
     }
 
     // Save dialog overlay (drawn on top of the menu)
@@ -432,7 +649,7 @@ fn draw_scene_menu(frame: &mut Frame, area: &Rect, app: &App) {
 /// Draw the save-name input dialog, centered inside the scene menu popup.
 fn draw_save_dialog(buf: &mut Buffer, popup: Rect, app: &App) {
     let dw: u16 = 28;
-    let dh: u16 = 3;
+    let dh: u16 = 4;
     let dx = popup.x + (popup.width.saturating_sub(dw)) / 2;
     let dy = popup.y + 3;
     let dialog = Rect::new(dx, dy, dw, dh);
@@ -543,15 +760,15 @@ fn draw_save_dialog(buf: &mut Buffer, popup: Rect, app: &App) {
         );
     }
 
-    // Cursor block (blinking — always shown as solid in save mode)
-    let cursor_x = input_x + input.len() as u16;
+    // Input cursor.
+    let cursor_x = input_x + input.chars().count() as u16;
     if cursor_x < dialog.x + dialog.width - 2 {
         putc(
             buf,
             cursor_x,
             dialog.y + 1,
-            ' ',
-            Color::Rgb(255, 236, 190),
+            '▏',
+            Color::Rgb(255, 220, 120),
             Color::Rgb(8, 10, 16),
         );
     }
@@ -568,5 +785,60 @@ fn draw_save_dialog(buf: &mut Buffer, popup: Rect, app: &App) {
             Color::Rgb(150, 156, 172),
             Color::Rgb(8, 10, 16),
         );
+    }
+}
+
+/// Draw the confirmation dialog over the centre of the terminal.
+fn draw_confirmation(frame: &mut Frame, area: &Rect, app: &App) {
+    let text = app.confirm.prompt();
+    let w = text.len() as u16 + 4;
+    let h: u16 = 3;
+    let w = w.min(area.width.saturating_sub(4));
+    let x = (area.width.saturating_sub(w)) / 2;
+    let y = (area.height.saturating_sub(h)) / 2;
+    let popup = Rect::new(x, y, w, h);
+
+    frame.render_widget(Clear, popup);
+    let block = Block::default().borders(Borders::ALL).style(
+        Style::default()
+            .fg(Color::Rgb(255, 220, 120))
+            .bg(Color::Rgb(18, 20, 30)),
+    );
+    frame.render_widget(block, popup);
+
+    let buf = frame.buffer_mut();
+    let inner_x = popup.x + 2;
+    for (i, ch) in text.chars().enumerate() {
+        let cx = inner_x + i as u16;
+        if cx >= popup.x + popup.width - 2 {
+            break;
+        }
+        putc(
+            buf,
+            cx,
+            popup.y + 1,
+            ch,
+            Color::Rgb(255, 236, 190),
+            Color::Rgb(18, 20, 30),
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn list_offset_keeps_cursor_visible() {
+        assert_eq!(list_offset(0, 31, 10), 0);
+        assert_eq!(list_offset(9, 31, 10), 0);
+        assert_eq!(list_offset(10, 31, 10), 1);
+        assert_eq!(list_offset(30, 31, 10), 21);
+    }
+
+    #[test]
+    fn short_lists_do_not_scroll() {
+        assert_eq!(list_offset(4, 5, 10), 0);
+        assert_eq!(scene_scroll_offset(4, 5, 14), 0);
     }
 }

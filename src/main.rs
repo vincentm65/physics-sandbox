@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use crossterm::{
     cursor,
-    event::{self, Event},
+    event::{self, DisableBracketedPaste, EnableBracketedPaste, Event},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -36,6 +36,7 @@ impl Drop for TerminalGuard {
             stdout,
             LeaveAlternateScreen,
             event::DisableMouseCapture,
+            DisableBracketedPaste,
             cursor::Show
         );
     }
@@ -57,6 +58,7 @@ fn main() -> io::Result<()> {
         stdout,
         EnterAlternateScreen,
         event::EnableMouseCapture,
+        EnableBracketedPaste,
         cursor::Hide
     )?;
     let _terminal_guard = TerminalGuard;
@@ -140,6 +142,7 @@ fn run(terminal: &mut Terminal<Backend>, world: &mut World, app: &mut App) -> io
                     step_acc -= 33;
                 }
             }
+            app.tick_status();
             terminal.draw(|frame| ui::draw(frame, world, app))?;
         }
 
