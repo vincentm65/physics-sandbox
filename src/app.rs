@@ -323,7 +323,13 @@ pub struct UndoState {
     vy: Packed<i8>,
     vy_frac: Packed<i8>,
     y_frac: Packed<i8>,
+    vx_frac: Packed<i8>,
+    x_frac: Packed<i8>,
     temp: Packed<i16>,
+    air_mass: Packed<i16>,
+    o2: Packed<i16>,
+    exhaust: Packed<i16>,
+    fuel_vapor: Packed<i16>,
 }
 
 impl UndoState {
@@ -343,7 +349,13 @@ impl UndoState {
             vy: Packed::new(world.vy()),
             vy_frac: Packed::new(world.vy_frac()),
             y_frac: Packed::new(world.y_frac()),
+            vx_frac: Packed::new(world.vx_frac()),
+            x_frac: Packed::new(world.x_frac()),
             temp: Packed::new(world.temp()),
+            air_mass: Packed::new(world.air_mass()),
+            o2: Packed::new(world.o2()),
+            exhaust: Packed::new(world.exhaust()),
+            fuel_vapor: Packed::new(world.fuel_vapor()),
         }
     }
 
@@ -360,9 +372,50 @@ impl UndoState {
             vy: self.vy.expand(len),
             vy_frac: self.vy_frac.expand(len),
             y_frac: self.y_frac.expand(len),
+            vx_frac: self.vx_frac.expand(len),
+            x_frac: self.x_frac.expand(len),
             temp: self.temp.expand(len),
+            air_mass: self.air_mass.expand(len),
+            o2: self.o2.expand(len),
+            exhaust: self.exhaust.expand(len),
+            fuel_vapor: self.fuel_vapor.expand(len),
             saved_at: 0,
         });
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum AtmosOverlay {
+    #[default]
+    None,
+    Pressure,
+    Oxygen,
+    Fuel,
+    Exhaust,
+    Temperature,
+}
+
+impl AtmosOverlay {
+    pub fn next(self) -> Self {
+        match self {
+            Self::None => Self::Pressure,
+            Self::Pressure => Self::Oxygen,
+            Self::Oxygen => Self::Fuel,
+            Self::Fuel => Self::Exhaust,
+            Self::Exhaust => Self::Temperature,
+            Self::Temperature => Self::None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::None => "Off",
+            Self::Pressure => "Pressure",
+            Self::Oxygen => "Oxygen",
+            Self::Fuel => "Fuel",
+            Self::Exhaust => "Exhaust",
+            Self::Temperature => "Temperature",
+        }
     }
 }
 
@@ -376,6 +429,7 @@ pub struct App {
     pub brush_options_open: bool,
     pub brush_options_cursor: usize,
     pub paused: bool,
+    pub atmos_overlay: AtmosOverlay,
     pub quit: bool,
     /// Last painted cell (in world coords) so a fast drag interpolates gaps.
     pub last_mouse: Option<(i32, i32)>,
@@ -442,6 +496,7 @@ impl Default for App {
             brush_options_open: false,
             brush_options_cursor: 0,
             paused: false,
+            atmos_overlay: AtmosOverlay::None,
             quit: false,
             last_mouse: None,
             drawing: false,
@@ -710,6 +765,23 @@ impl App {
             }
             KeyCode::Char('e') | KeyCode::Char('E') => self.open_tool_picker(),
             KeyCode::Tab | KeyCode::Enter | KeyCode::Char('m') => self.open_picker(),
+            KeyCode::Char('a') | KeyCode::Char('A') => {
+                world.toggle_atmos();
+                self.set_status(
+                    format!(
+                        "Atmosphere simulation {}",
+                        if world.atmos_enabled() { "on" } else { "off" }
+                    ),
+                    false,
+                );
+            }
+            KeyCode::Char('o') | KeyCode::Char('O') => {
+                self.atmos_overlay = self.atmos_overlay.next();
+                self.set_status(
+                    format!("Atmosphere overlay: {}", self.atmos_overlay.name()),
+                    false,
+                );
+            }
             KeyCode::Char('z') => self.zoom = 1,
             KeyCode::Char('x') => self.zoom = 2,
             KeyCode::Char('i') => self.pan(0, -4, world),
@@ -1689,6 +1761,12 @@ mod tests {
         let expected_y_frac = world.y_frac().to_vec();
         assert!(expected_vy_frac.iter().any(|&value| value != 0));
         let expected_temp = world.temp().to_vec();
+        let expected_vx_frac = world.vx_frac().to_vec();
+        let expected_x_frac = world.x_frac().to_vec();
+        let expected_air_mass = world.air_mass().to_vec();
+        let expected_o2 = world.o2().to_vec();
+        let expected_exhaust = world.exhaust().to_vec();
+        let expected_fuel_vapor = world.fuel_vapor().to_vec();
         let snapshot = UndoState::from_world(&world);
 
         world.clear();
@@ -1705,6 +1783,12 @@ mod tests {
         assert_eq!(world.vy_frac(), expected_vy_frac);
         assert_eq!(world.y_frac(), expected_y_frac);
         assert_eq!(world.temp(), expected_temp);
+        assert_eq!(world.vx_frac(), expected_vx_frac);
+        assert_eq!(world.x_frac(), expected_x_frac);
+        assert_eq!(world.air_mass(), expected_air_mass);
+        assert_eq!(world.o2(), expected_o2);
+        assert_eq!(world.exhaust(), expected_exhaust);
+        assert_eq!(world.fuel_vapor(), expected_fuel_vapor);
     }
 
     #[test]

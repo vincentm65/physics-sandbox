@@ -52,6 +52,11 @@ impl World {
                 self.put(i, Empty, 0);
             }
         }
+
+        // Atmosphere overpressure / heat from explosion.
+        if self.atmos_enabled {
+            self.explode_atmos_effect(x, y, radius);
+        }
     }
 
     /// Push the cell at `(x, y)` further from the blast origin along `(dx, dy)`.
@@ -69,6 +74,8 @@ impl World {
         let vy = self.vy[i];
         let vy_frac = self.vy_frac[i];
         let y_frac = self.y_frac[i];
+        let vx_frac = self.vx_frac[i];
+        let x_frac = self.x_frac[i];
 
         // Prefer longer throws, then cardinal fallbacks when the diagonal is blocked.
         let candidates = [
@@ -98,6 +105,8 @@ impl World {
             self.life[i] = 0;
             self.vx[i] = 0;
             self.vy[i] = 0;
+            self.vx_frac[i] = 0;
+            self.x_frac[i] = 0;
             self.vy_frac[i] = 0;
             self.y_frac[i] = 0;
             self.temp[i] = AMBIENT_TEMP;
@@ -119,6 +128,8 @@ impl World {
             self.temp[li] = temp;
             self.vx[li] = new_vx;
             self.vy[li] = new_vy;
+            self.vx_frac[li] = vx_frac;
+            self.x_frac[li] = x_frac;
             self.vy_frac[li] = new_vy_frac;
             self.y_frac[li] = y_frac;
             self.moved_tick[li] = self.tick;
@@ -379,6 +390,53 @@ impl World {
         }
     }
 
+    /// Convert the weight of a liquid column into lateral momentum at an open
+    /// boundary. The cells remain incompressible; pressure only acts when the
+    /// column is supported and has somewhere to discharge.
+    fn apply_liquid_pressure(&mut self, x: usize, y: usize, m: Material) {
+        let cap = pressure_speed_of(m);
+        if cap == 0 {
+            return;
+        }
+
+        let supported = self
+            .adj(x, y, 0, 1)
+            .is_none_or(|(bx, by)| !m.can_sink_into(self.get(bx, by)));
+        if !supported {
+            return;
+        }
+
+        let mut head = 1usize;
+        let mut cy = y;
+        while head < 16 && cy > 0 {
+            cy -= 1;
+            if !self.get(x, cy).is_liquid() {
+                break;
+            }
+            head += 1;
+        }
+        if head < 2 {
+            return;
+        }
+
+        let left_open = x > 0 && self.get(x - 1, y) == Empty;
+        let right_open = x + 1 < self.width && self.get(x + 1, y) == Empty;
+        let dir = match (left_open, right_open) {
+            (true, false) => -1,
+            (false, true) => 1,
+            (true, true) => self.dirs(x, y, 0x22).0,
+            (false, false) => return,
+        };
+        let speed = (1 + (head.saturating_sub(1) / 3) as i8).min(cap);
+        let i = self.idx(x, y);
+        if self.vx[i].unsigned_abs() < speed as u8 {
+            self.vx[i] = dir as i8 * speed;
+            self.vx_frac[i] = 0;
+            self.x_frac[i] = 0;
+            self.activate_idx(i);
+        }
+    }
+
     pub(super) fn step_liquid(&mut self, x: usize, y: usize) {
         let i = self.idx(x, y);
 
@@ -405,8 +463,11 @@ impl World {
             }
         }
 
-        // Apply vertical force (gravity) after lifecycle/reaction checks.
+        // Apply vertical force and hydrostatic pressure after lifecycle/reaction
+        // checks. Supported columns discharge sideways with speed proportional
+        // to their head; falling liquid remains governed by gravity.
         self.apply_vertical_force(i);
+        self.apply_liquid_pressure(x, y, m);
         let has_vertical_step = self.has_vertical_step(i);
 
         // --- Velocity-driven movement (Phase B) ---
@@ -467,6 +528,7 @@ impl World {
         range: usize,
         allow: impl Fn(Material) -> bool,
     ) -> bool {
+        let material = self.get(x, y);
         let mut cx = x as i32;
         for _ in 0..range {
             if !self.try_step(cx as usize, y, dir, 0, &allow) {
@@ -480,7 +542,19 @@ impl World {
                 break;
             }
         }
-        cx != x as i32
+        if cx == x as i32 {
+            return false;
+        }
+
+        let momentum = flow_momentum_of(material);
+        if momentum > 0 {
+            let i = self.idx(cx as usize, y);
+            self.vx[i] = dir as i8 * momentum;
+            self.vx_frac[i] = 0;
+            self.x_frac[i] = 0;
+            self.activate_idx(i);
+        }
+        true
     }
 
     pub(super) fn step_gas(&mut self, x: usize, y: usize) {
@@ -563,7 +637,28 @@ impl World {
         }
         self.life[i] = life;
 
-        let mut has_air = false;
+        // Atmosphere‑integrated oxygen check (when enabled).
+        if self.atmos_enabled {
+            // O₂ depletion + extinction is handled by step_combustion_atmos()
+            // which runs before cellular stepping.  If the fire was already
+            // converted to smoke there, return early.
+            if self.grid[i] != Fire {
+                return;
+            }
+        } else {
+            // Legacy fallback: no free neighbour → smother.
+            let mut has_air = false;
+            for (nx, ny) in self.n8(x, y).into_iter().flatten() {
+                let ni = self.idx(nx, ny);
+                let other = self.grid[ni];
+                has_air |= matches!(other, Empty | Smoke | Steam | Fire) || other.flammable();
+            }
+            if !has_air {
+                self.put(i, Smoke, rand_range(SMOKE_LIFE_MIN / 2, SMOKE_LIFE_MAX / 2));
+                return;
+            }
+        }
+
         let mut oily = false;
         let mut water = [0; 8];
         let mut water_len = 0;
@@ -571,7 +666,6 @@ impl World {
         for (nx, ny) in self.n8(x, y).into_iter().flatten() {
             let ni = self.idx(nx, ny);
             let other = self.grid[ni];
-            has_air |= matches!(other, Empty | Smoke | Steam | Fire) || other.flammable();
             oily |= other.is_oily();
             if other == Water {
                 water[water_len] = ni;
@@ -579,13 +673,6 @@ impl World {
             } else if other == LiquidNitrogen {
                 extinguished = true;
             }
-        }
-
-        // No oxygen: a flame fully boxed in by solids smothers into smoke.
-        // Embers still smoulder without free air; only open flame is gated.
-        if !has_air {
-            self.put(i, Smoke, rand_range(SMOKE_LIFE_MIN / 2, SMOKE_LIFE_MAX / 2));
-            return;
         }
 
         // Oil/napalm fires shrug off water: water boils away, flame keeps burning.
@@ -731,5 +818,50 @@ mod tests {
         assert_eq!(world.velocity_at(4, 1), (-1, 3));
         let target = world.idx(4, 1);
         assert_eq!((world.vy_frac[target], world.y_frac[target]), (2, 3));
+    }
+
+    fn pressurized_column(material: Material) -> World {
+        let mut world = World::new(12, 10);
+        for x in 0..12 {
+            world.paint(x, 9, Metal);
+        }
+        world.paint(1, 8, Metal);
+        for y in 1..=8 {
+            world.paint(2, y, material);
+        }
+        world
+    }
+
+    #[test]
+    fn hydrostatic_head_drives_a_horizontal_jet() {
+        let mut world = pressurized_column(Water);
+
+        world.apply_liquid_pressure(2, 8, Water);
+        assert_eq!(world.velocity_at(2, 8), (3, 0));
+        assert!(world.try_velocity_move(2, 8));
+        assert_eq!(world.get(5, 8), Water);
+        assert_eq!(world.velocity_at(5, 8), (3, 0));
+    }
+
+    #[test]
+    fn viscosity_limits_pressure_velocity() {
+        let mut oil = pressurized_column(Oil);
+        oil.apply_liquid_pressure(2, 8, Oil);
+        assert_eq!(oil.velocity_at(2, 8), (2, 0));
+
+        let mut lava = pressurized_column(Lava);
+        lava.apply_liquid_pressure(2, 8, Lava);
+        assert_eq!(lava.velocity_at(2, 8), (1, 0));
+    }
+
+    #[test]
+    fn unsupported_liquid_does_not_generate_lateral_pressure() {
+        let mut world = World::new(5, 6);
+        for y in 1..=3 {
+            world.paint(2, y, Water);
+        }
+
+        world.apply_liquid_pressure(2, 3, Water);
+        assert_eq!(world.velocity_at(2, 3), (0, 0));
     }
 }

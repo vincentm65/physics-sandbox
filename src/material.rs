@@ -247,7 +247,6 @@ impl Material {
             Lava => Some(1_300),
             Fire => Some(900),
             Ember => Some(700),
-            Steam => Some(105),
             Smoke => Some(60),
             LiquidNitrogen => Some(-196),
             Ice => Some(-5),
@@ -257,7 +256,10 @@ impl Material {
 
     /// Temperature assigned when the material is painted into the world.
     pub fn painted_temperature(self) -> i16 {
-        self.heat_source_temp().unwrap_or(AMBIENT_TEMP)
+        match self {
+            Steam => 105,
+            _ => self.heat_source_temp().unwrap_or(AMBIENT_TEMP),
+        }
     }
 
     /// How quickly this material equalizes with neighbors (0 = insulator, 8 = metal).

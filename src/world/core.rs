@@ -31,10 +31,23 @@ pub struct World {
     /// Fractional vertical velocity and displacement in quarter-cell units.
     pub(super) vy_frac: Vec<i8>,
     pub(super) y_frac: Vec<i8>,
+    /// Fractional horizontal velocity and displacement in quarter-cell units.
+    pub(super) vx_frac: Vec<i8>,
+    pub(super) x_frac: Vec<i8>,
     /// Approximate Celsius temperature per cell.
     pub(super) temp: Vec<i16>,
     /// Scratch buffer for heat diffusion.
     pub(super) temp_next: Vec<i16>,
+    /// Atmosphere: air mass (fixed-point, AMBIENT_AIR_MASS = ambient).
+    pub(super) air_mass: Vec<i16>,
+    /// Atmosphere: oxygen component.
+    pub(super) o2: Vec<i16>,
+    /// Atmosphere: exhaust (CO2, etc.) component.
+    pub(super) exhaust: Vec<i16>,
+    /// Atmosphere: fuel vapor component.
+    pub(super) fuel_vapor: Vec<i16>,
+    /// Atmosphere: simulation enabled flag.
+    pub(super) atmos_enabled: bool,
     pub(super) moved_tick: Vec<u64>,
     pub(super) active_chunks: Vec<bool>,
     pub(super) next_active_chunks: Vec<bool>,
@@ -46,8 +59,8 @@ pub struct World {
     structural_ordered: Vec<usize>,
     structural_membership: Vec<bool>,
     structural_targets: Vec<bool>,
-    structural_moves: Vec<(usize, usize, u16, u8, i16, i8, i8, i8, i8)>,
-    structural_displaced: Vec<(Material, u16, u8, i16, i8, i8, i8, i8)>,
+    structural_moves: Vec<(usize, usize, u16, u8, i16, i8, i8, i8, i8, i8, i8)>,
+    structural_displaced: Vec<(Material, u16, u8, i16, i8, i8, i8, i8, i8, i8)>,
     pub(super) chunks_x: usize,
     pub(super) chunks_y: usize,
     pub(super) tick: u64,
@@ -67,8 +80,15 @@ impl World {
             vy: vec![0; n],
             vy_frac: vec![0; n],
             y_frac: vec![0; n],
+            vx_frac: vec![0; n],
+            x_frac: vec![0; n],
             temp: vec![AMBIENT_TEMP; n],
             temp_next: vec![AMBIENT_TEMP; n],
+            air_mass: vec![AMBIENT_AIR_MASS; n],
+            o2: vec![AMBIENT_O2; n],
+            exhaust: vec![0; n],
+            fuel_vapor: vec![0; n],
+            atmos_enabled: true,
             moved_tick: vec![u64::MAX; n],
             active_chunks: vec![false; chunks_len(width, height)],
             next_active_chunks: vec![false; chunks_len(width, height)],
@@ -88,7 +108,7 @@ impl World {
         }
     }
 
-    pub(super) fn idx(&self, x: usize, y: usize) -> usize {
+    pub(crate) fn idx(&self, x: usize, y: usize) -> usize {
         y * self.width + x
     }
 
@@ -113,6 +133,18 @@ impl World {
     pub fn temp_at(&self, x: usize, y: usize) -> i16 {
         self.temp[self.idx(x, y)]
     }
+    pub fn atmosphere_at(&self, x: usize, y: usize) -> (i16, i16, i16, i16) {
+        let i = self.idx(x, y);
+        (
+            self.air_mass[i],
+            self.o2[i],
+            self.fuel_vapor[i],
+            self.exhaust[i],
+        )
+    }
+    pub fn pressure_at(&self, x: usize, y: usize) -> i32 {
+        self.cell_pressure(self.idx(x, y))
+    }
     pub fn velocity_at(&self, x: usize, y: usize) -> (i8, i8) {
         let i = self.idx(x, y);
         (self.vx[i], self.vy[i])
@@ -124,6 +156,8 @@ impl World {
         let i = self.idx(x, y);
         self.vx[i] = vx.clamp(-MAX_VELOCITY, MAX_VELOCITY);
         self.vy[i] = vy.clamp(-MAX_VELOCITY, MAX_VELOCITY);
+        self.vx_frac[i] = 0;
+        self.x_frac[i] = 0;
         self.vy_frac[i] = 0;
         self.y_frac[i] = 0;
     }
@@ -138,17 +172,102 @@ impl World {
         &self.y_frac
     }
 
+    /// Expose vx_frac for serialization and snapshots.
+    pub fn vx_frac(&self) -> &[i8] {
+        &self.vx_frac
+    }
+
+    /// Expose x_frac for serialization and snapshots.
+    pub fn x_frac(&self) -> &[i8] {
+        &self.x_frac
+    }
+
+    /// Expose air_mass for serialization and snapshots.
+    pub fn air_mass(&self) -> &[i16] {
+        &self.air_mass
+    }
+
+    /// Mutable air_mass access (testing, scene init).
+    pub fn air_mass_mut(&mut self) -> &mut [i16] {
+        &mut self.air_mass
+    }
+
+    /// Expose o2 for serialization and snapshots.
+    pub fn o2(&self) -> &[i16] {
+        &self.o2
+    }
+
+    /// Mutable o2 access (testing, scene init).
+    pub fn o2_mut(&mut self) -> &mut [i16] {
+        &mut self.o2
+    }
+
+    /// Expose exhaust for serialization and snapshots.
+    pub fn exhaust(&self) -> &[i16] {
+        &self.exhaust
+    }
+
+    /// Mutable exhaust access.
+    pub fn exhaust_mut(&mut self) -> &mut [i16] {
+        &mut self.exhaust
+    }
+
+    /// Expose fuel_vapor for serialization and snapshots.
+    pub fn fuel_vapor(&self) -> &[i16] {
+        &self.fuel_vapor
+    }
+
+    /// Mutable fuel_vapor access.
+    pub fn fuel_vapor_mut(&mut self) -> &mut [i16] {
+        &mut self.fuel_vapor
+    }
+
+    /// Return the atmosphere simulation enabled flag.
+    pub fn atmos_enabled(&self) -> bool {
+        self.atmos_enabled
+    }
+
+    /// Toggle atmosphere simulation (preserves state).
+    pub fn toggle_atmos(&mut self) {
+        self.atmos_enabled = !self.atmos_enabled;
+    }
+
+    /// Reset atmosphere to ambient in all cells.
+    pub fn reset_atmosphere(&mut self) {
+        self.ambient_init_atmosphere();
+    }
+
+    /// Whether a cell allows gas flow (empty, gas, or fire).
+    pub(super) fn is_gas_permeable(&self, i: usize) -> bool {
+        let m = self.grid[i];
+        m.is_empty() || m.is_gas()
+    }
+
     /// Paint a single cell (used by the brush; does not touch movement bookkeeping).
     pub fn paint(&mut self, x: usize, y: usize, m: Material) {
         if x >= self.width || y >= self.height {
             return;
         }
         let i = self.idx(x, y);
+        let was_passable = self.is_gas_permeable(i);
         self.grid[i] = m;
+        if !(m.is_empty() || m.is_gas()) {
+            self.air_mass[i] = 0;
+            self.o2[i] = 0;
+            self.exhaust[i] = 0;
+            self.fuel_vapor[i] = 0;
+        } else if !was_passable {
+            self.air_mass[i] = AMBIENT_AIR_MASS;
+            self.o2[i] = AMBIENT_O2;
+            self.exhaust[i] = 0;
+            self.fuel_vapor[i] = 0;
+        }
         self.seed[i] = rand::random();
         self.life[i] = rand_life(m);
         self.vx[i] = 0;
         self.vy[i] = 0;
+        self.vx_frac[i] = 0;
+        self.x_frac[i] = 0;
         self.vy_frac[i] = 0;
         self.y_frac[i] = 0;
         self.temp[i] = m.painted_temperature();
@@ -173,6 +292,8 @@ impl World {
         self.seed[i] = state.2;
         self.vx[i] = 0;
         self.vy[i] = 0;
+        self.vx_frac[i] = 0;
+        self.x_frac[i] = 0;
         self.vy_frac[i] = 0;
         self.y_frac[i] = 0;
         self.temp[i] = state.3;
@@ -188,8 +309,11 @@ impl World {
         }
         self.vx.fill(0);
         self.vy.fill(0);
+        self.vx_frac.fill(0);
+        self.x_frac.fill(0);
         self.vy_frac.fill(0);
         self.y_frac.fill(0);
+        self.reset_atmosphere();
         self.tick = 0;
         self.moved_tick.fill(u64::MAX);
         self.active_chunks.fill(false);
@@ -280,11 +404,56 @@ impl World {
                     .copied()
                     .unwrap_or(0)
                     .clamp(-(VELOCITY_SCALE - 1), VELOCITY_SCALE - 1);
+                self.vx_frac[dst] = state
+                    .vx_frac
+                    .get(src)
+                    .copied()
+                    .unwrap_or(0)
+                    .clamp(-(VELOCITY_SCALE - 1), VELOCITY_SCALE - 1);
+                self.x_frac[dst] = state
+                    .x_frac
+                    .get(src)
+                    .copied()
+                    .unwrap_or(0)
+                    .clamp(-(VELOCITY_SCALE - 1), VELOCITY_SCALE - 1);
                 self.temp[dst] = state
                     .temp
                     .get(src)
                     .copied()
                     .unwrap_or_else(|| self.grid[dst].painted_temperature());
+                // Initialize atmosphere from saved state or permeability defaults.
+                let default_mass = if self.is_gas_permeable(dst) {
+                    AMBIENT_AIR_MASS
+                } else {
+                    0
+                };
+                self.air_mass[dst] = state
+                    .air_mass
+                    .get(src)
+                    .copied()
+                    .unwrap_or(default_mass)
+                    .clamp(0, MAX_AIR_MASS);
+                let mut available = self.air_mass[dst];
+                self.o2[dst] = state
+                    .o2
+                    .get(src)
+                    .copied()
+                    .unwrap_or(if default_mass > 0 { AMBIENT_O2 } else { 0 })
+                    .clamp(0, available);
+                available -= self.o2[dst];
+                self.exhaust[dst] = state
+                    .exhaust
+                    .get(src)
+                    .copied()
+                    .unwrap_or(0)
+                    .clamp(0, available);
+                available -= self.exhaust[dst];
+                self.fuel_vapor[dst] = state
+                    .fuel_vapor
+                    .get(src)
+                    .copied()
+                    .unwrap_or(0)
+                    .clamp(0, available);
             }
         }
         self.tick = 0;
@@ -301,7 +470,13 @@ impl World {
         let mut vy = vec![0; width * height];
         let mut vy_frac = vec![0; width * height];
         let mut y_frac = vec![0; width * height];
+        let mut vx_frac = vec![0; width * height];
+        let mut x_frac = vec![0; width * height];
         let mut temp = vec![AMBIENT_TEMP; width * height];
+        let mut air_mass = vec![AMBIENT_AIR_MASS; width * height];
+        let mut o2 = vec![AMBIENT_O2; width * height];
+        let mut exhaust = vec![0; width * height];
+        let mut fuel_vapor = vec![0; width * height];
         let cw = width.min(self.width);
         let ch = height.min(self.height);
         for y in 0..ch {
@@ -314,7 +489,13 @@ impl World {
                 vy[y * width + x] = cell_vy;
                 vy_frac[y * width + x] = self.vy_frac[y * self.width + x];
                 y_frac[y * width + x] = self.y_frac[y * self.width + x];
+                vx_frac[y * width + x] = self.vx_frac[y * self.width + x];
+                x_frac[y * width + x] = self.x_frac[y * self.width + x];
                 temp[y * width + x] = self.temp[y * self.width + x];
+                air_mass[y * width + x] = self.air_mass[y * self.width + x];
+                o2[y * width + x] = self.o2[y * self.width + x];
+                exhaust[y * width + x] = self.exhaust[y * self.width + x];
+                fuel_vapor[y * width + x] = self.fuel_vapor[y * self.width + x];
             }
         }
         self.width = width;
@@ -326,7 +507,13 @@ impl World {
         self.vy = vy;
         self.vy_frac = vy_frac;
         self.y_frac = y_frac;
+        self.vx_frac = vx_frac;
+        self.x_frac = x_frac;
         self.temp = temp;
+        self.air_mass = air_mass;
+        self.o2 = o2;
+        self.exhaust = exhaust;
+        self.fuel_vapor = fuel_vapor;
         self.temp_next = vec![AMBIENT_TEMP; width * height];
         self.moved_tick = vec![u64::MAX; width * height];
         self.chunks_x = chunks_x(width);
@@ -376,17 +563,34 @@ impl World {
 
     pub(super) fn put(&mut self, i: usize, m: Material, life: u16) {
         let prev_temp = self.temp[i];
+        let was_passable = self.is_gas_permeable(i);
         self.grid[i] = m;
+        if !(m.is_empty() || m.is_gas()) {
+            self.air_mass[i] = 0;
+            self.o2[i] = 0;
+            self.exhaust[i] = 0;
+            self.fuel_vapor[i] = 0;
+        } else if !was_passable {
+            self.air_mass[i] = AMBIENT_AIR_MASS;
+            self.o2[i] = AMBIENT_O2;
+            self.exhaust[i] = 0;
+            self.fuel_vapor[i] = 0;
+        }
         self.life[i] = life;
         self.seed[i] = rand::random();
         self.vx[i] = 0;
         self.vy[i] = 0;
+        self.vx_frac[i] = 0;
+        self.x_frac[i] = 0;
         self.vy_frac[i] = 0;
         self.y_frac[i] = 0;
         // Heat sources clamp; everything else keeps the cell's thermal history so
         // phase changes (ice→water, lava→stone) stay continuous instead of
-        // snapping back to ambient.
-        self.temp[i] = m.heat_source_temp().unwrap_or(prev_temp);
+        // snapping back to ambient. Steam starts near its boiling point but is
+        // not a permanent heat source, so it cools instead of boiling whole pools.
+        self.temp[i] = m
+            .heat_source_temp()
+            .unwrap_or(if m == Steam { 105 } else { prev_temp });
         self.moved_tick[i] = self.tick;
         self.activate_idx(i);
     }
@@ -397,9 +601,15 @@ impl World {
         self.seed.swap(a, b);
         self.vx.swap(a, b);
         self.vy.swap(a, b);
+        self.vx_frac.swap(a, b);
+        self.x_frac.swap(a, b);
         self.vy_frac.swap(a, b);
         self.y_frac.swap(a, b);
         self.temp.swap(a, b);
+        self.air_mass.swap(a, b);
+        self.o2.swap(a, b);
+        self.exhaust.swap(a, b);
+        self.fuel_vapor.swap(a, b);
         self.moved_tick[a] = self.tick;
         self.moved_tick[b] = self.tick;
         self.activate_idx(a);
@@ -538,6 +748,8 @@ impl World {
                 let ci = self.idx(cx as usize, cy as usize);
                 if nx < 0 || nx >= self.width as i32 {
                     self.vx[ci] = 0;
+                    self.vx_frac[ci] = 0;
+                    self.x_frac[ci] = 0;
                     blocked = true;
                 } else {
                     let ni = self.idx(nx as usize, cy as usize);
@@ -547,6 +759,8 @@ impl World {
                         moved = true;
                     } else {
                         self.vx[ci] = 0;
+                        self.vx_frac[ci] = 0;
+                        self.x_frac[ci] = 0;
                         blocked = true;
                     }
                 }
@@ -789,6 +1003,8 @@ impl World {
                 self.vy[i],
                 self.vy_frac[i],
                 self.y_frac[i],
+                self.vx_frac[i],
+                self.x_frac[i],
             ));
             if !in_component[ti] && self.grid[ti] != Empty {
                 displaced.push((
@@ -800,22 +1016,26 @@ impl World {
                     self.vy[ti],
                     self.vy_frac[ti],
                     self.y_frac[ti],
+                    self.vx_frac[ti],
+                    self.x_frac[ti],
                 ));
             }
         }
 
-        for &(i, _, _, _, _, _, _, _, _) in &moves {
+        for &(i, _, _, _, _, _, _, _, _, _, _) in &moves {
             self.grid[i] = Empty;
             self.life[i] = 0;
             self.vx[i] = 0;
             self.vy[i] = 0;
+            self.vx_frac[i] = 0;
+            self.x_frac[i] = 0;
             self.vy_frac[i] = 0;
             self.y_frac[i] = 0;
             self.temp[i] = AMBIENT_TEMP;
             self.moved_tick[i] = self.tick;
             self.activate_idx(i);
         }
-        for &(_, ti, life, seed, temp, vx, vy, vy_frac, y_frac) in &moves {
+        for &(_, ti, life, seed, temp, vx, vy, vy_frac, y_frac, vx_frac, x_frac) in &moves {
             self.grid[ti] = material;
             self.life[ti] = life;
             self.seed[ti] = seed;
@@ -824,14 +1044,18 @@ impl World {
             self.vy[ti] = vy;
             self.vy_frac[ti] = vy_frac;
             self.y_frac[ti] = y_frac;
+            self.vx_frac[ti] = vx_frac;
+            self.x_frac[ti] = x_frac;
             self.moved_tick[ti] = self.tick;
             self.activate_idx(ti);
         }
-        for &(i, _, _, _, _, _, _, _, _) in &moves {
+        for &(i, _, _, _, _, _, _, _, _, _, _) in &moves {
             if target_set[i] {
                 continue;
             }
-            if let Some((m, life, seed, temp, vx, vy, vy_frac, y_frac)) = displaced.pop() {
+            if let Some((m, life, seed, temp, vx, vy, vy_frac, y_frac, vx_frac, x_frac)) =
+                displaced.pop()
+            {
                 self.grid[i] = m;
                 self.life[i] = life;
                 self.seed[i] = seed;
@@ -840,6 +1064,8 @@ impl World {
                 self.vy[i] = vy;
                 self.vy_frac[i] = vy_frac;
                 self.y_frac[i] = y_frac;
+                self.vx_frac[i] = vx_frac;
+                self.x_frac[i] = x_frac;
             }
         }
 
@@ -981,6 +1207,11 @@ impl World {
         self.step_heat();
         self.step_structural_components();
 
+        // Atmosphere transport & combustion (only when enabled).
+        if self.atmos_enabled {
+            self.step_atmosphere();
+        }
+
         for chunk_y in (0..self.chunks_y).rev() {
             let chunks_ltr = self.tick.wrapping_add(chunk_y as u64).is_multiple_of(2);
             for chunk_k in 0..self.chunks_x {
@@ -1084,6 +1315,12 @@ impl World {
             }
         }
         std::mem::swap(&mut self.active_chunks, &mut self.next_active_chunks);
+
+        // Pressure‑gradient impulses (after movement so forces act on settled cells).
+        if self.atmos_enabled {
+            self.step_pressure_forces();
+        }
+
         self.tick = self.tick.wrapping_add(1);
     }
 }
@@ -1437,6 +1674,8 @@ mod tests {
     fn gas_buoyancy_accumulates_before_moving() {
         let mut world = World::new(5, 8);
         world.paint(2, 6, Steam);
+        let steam_i = world.idx(2, 6);
+        world.temp[steam_i] = 500;
 
         world.step();
         assert_eq!(world.get(2, 6), Steam);
@@ -1505,5 +1744,115 @@ mod tests {
             (3, -1),
             "existing velocity combined with outward impulse"
         );
+    }
+
+    // --- Phase C0: horizontal fractional state tests ---
+
+    #[test]
+    fn horizontal_oob_clears_vx_frac_and_x_frac() {
+        let mut world = World::new(3, 3);
+        world.paint(2, 1, Sand);
+        world.set_velocity(2, 1, 2, 0);
+        let i = world.idx(2, 1);
+        world.vx_frac[i] = 1;
+        world.x_frac[i] = 2;
+        let moved = world.try_velocity_move(2, 1);
+        assert!(!moved, "should not move out of bounds");
+        assert_eq!(world.get(2, 1), Sand, "sand stays in place");
+        let i = world.idx(2, 1);
+        assert_eq!(world.vx[i], 0, "vx zeroed on OOB");
+        assert_eq!(world.vx_frac[i], 0, "vx_frac zeroed on OOB");
+        assert_eq!(world.x_frac[i], 0, "x_frac zeroed on OOB");
+    }
+
+    #[test]
+    fn horizontal_collision_clears_vx_frac_and_x_frac() {
+        let mut world = World::new(5, 3);
+        world.paint(0, 1, Sand);
+        world.set_velocity(0, 1, 2, 0);
+        world.paint(2, 1, Stone);
+        let i = world.idx(0, 1);
+        world.vx_frac[i] = -2;
+        world.x_frac[i] = 1;
+        let moved = world.try_velocity_move(0, 1);
+        assert!(moved, "should move before barrier");
+        assert_eq!(world.get(1, 1), Sand, "sand stopped before barrier");
+        let i = world.idx(1, 1);
+        assert_eq!(world.vx[i], 0, "vx zeroed on collision");
+        assert_eq!(world.vx_frac[i], 0, "vx_frac zeroed on collision");
+        assert_eq!(world.x_frac[i], 0, "x_frac zeroed on collision");
+    }
+
+    #[test]
+    fn structural_translation_carries_horizontal_fractional_state() {
+        let mut world = World::new(3, 3);
+        world.paint(1, 0, Wood);
+        world.set_velocity(1, 0, 2, 3);
+        let source = world.idx(1, 0);
+        world.vx_frac[source] = 2;
+        world.x_frac[source] = 3;
+        world.vy_frac[source] = 1;
+        world.y_frac[source] = 2;
+        let mut membership = vec![false; world.width * world.height];
+        membership[source] = true;
+
+        world.translate_structural_component(Wood, &[source], &membership, 0, 1);
+
+        let target = world.idx(1, 1);
+        assert_eq!(world.get(1, 1), Wood);
+        assert_eq!(world.velocity_at(1, 1), (2, 3));
+        assert_eq!(
+            (world.vx_frac[target], world.x_frac[target]),
+            (2, 3),
+            "vx_frac/x_frac carried through translation"
+        );
+        assert_eq!(
+            (world.vy_frac[target], world.y_frac[target]),
+            (1, 2),
+            "vy_frac/y_frac carried through translation"
+        );
+    }
+
+    #[test]
+    fn fling_outward_carries_horizontal_fractional_state() {
+        let mut world = World::new(9, 3);
+        world.paint(2, 1, Water);
+        world.set_velocity(2, 1, 1, 0);
+        let source = world.idx(2, 1);
+        world.vx_frac[source] = 2;
+        world.x_frac[source] = 1;
+
+        assert!(world.fling_outward(2, 1, 1, 0));
+        assert_eq!(world.get(2, 1), Empty);
+        let target = world.idx(4, 1);
+        assert_eq!(world.get(4, 1), Water);
+        // Impulse (2,0) combines with existing vx=1 => vx=3; vx_frac preserved.
+        assert_eq!(world.vx[target], 3);
+        assert_eq!(world.vx_frac[target], 2, "vx_frac carried by fling");
+        assert_eq!(world.x_frac[target], 1, "x_frac carried by fling");
+    }
+
+    #[test]
+    fn swap_carries_horizontal_fractional_state() {
+        let mut world = World::new(4, 2);
+        world.paint(0, 1, Sand);
+        world.set_velocity(0, 1, 2, 0);
+        let i = world.idx(0, 1);
+        world.vx_frac[i] = -1;
+        world.x_frac[i] = 2;
+
+        let source = world.idx(0, 1);
+        let target = world.idx(3, 1);
+        world.swap(source, target);
+
+        assert_eq!(world.get(0, 1), Empty);
+        assert_eq!(world.get(3, 1), Sand);
+        let ti = world.idx(3, 1);
+        assert_eq!(world.vx[ti], 2);
+        assert_eq!(world.vx_frac[ti], -1, "vx_frac carried by swap");
+        assert_eq!(world.x_frac[ti], 2, "x_frac carried by swap");
+        let si = world.idx(0, 1);
+        assert_eq!(world.vx_frac[si], 0, "source vx_frac cleared by swap");
+        assert_eq!(world.x_frac[si], 0, "source x_frac cleared by swap");
     }
 }

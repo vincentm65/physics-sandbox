@@ -3,6 +3,8 @@
 
 use crate::app::{App, BrushShape, Confirm, EditorTool};
 use crate::material::Material;
+use crate::world::AMBIENT_AIR_MASS;
+use crate::world::AMBIENT_O2;
 use crate::world::{FUSE_BURN_TICKS, Scene, World};
 use Material::*;
 use crossterm::event::{
@@ -369,6 +371,7 @@ fn fire_ignites_wood() -> Result<(), String> {
         }
     }
     w.paint(7, 7, Fire);
+    w.set_air_enabled(false);
     let initial = count(&w, Wood);
     for _ in 0..1200 {
         w.step();
@@ -472,6 +475,7 @@ fn fire_leaves_ash() -> Result<(), String> {
     }
     w.paint(11, 8, Fire);
     w.paint(12, 8, Fire);
+    w.set_air_enabled(false);
     let mut peak = 0;
     for _ in 0..4000 {
         w.step();
@@ -1010,10 +1014,15 @@ fn gunpowder_explosion_damages_its_radius() -> Result<(), String> {
     }
     w.paint(cx, cy, Gunpowder);
     w.paint(cx, cy - 1, Fire);
+    w.set_air_enabled(false);
     w.step();
 
-    if w.get(cx + 4, cy) == Stone || w.get(cx, cy + 5) == Stone {
-        return Err("blast did not damage material inside its radius".into());
+    let inner_x = w.get(cx + 4, cy);
+    let inner_y = w.get(cx, cy + 5);
+    if inner_x == Stone || inner_y == Stone {
+        return Err(format!(
+            "blast did not damage material inside its radius (x+4={inner_x:?}, y+5={inner_y:?})"
+        ));
     }
     if w.get(cx + 5, cy + 5) != Stone {
         return Err("blast damaged material outside its radius".into());
@@ -1492,6 +1501,38 @@ fn water_boils_above_100() -> Result<(), String> {
     ))
 }
 
+fn brief_fire_does_not_vaporize_pool() -> Result<(), String> {
+    let mut w = World::new(21, 12);
+    for y in 3..=10 {
+        w.paint(1, y, Metal);
+        w.paint(19, y, Metal);
+    }
+    for x in 1..=19 {
+        w.paint(x, 10, Metal);
+    }
+    for y in 5..10 {
+        for x in 2..19 {
+            w.paint(x, y, Water);
+        }
+    }
+
+    // Briefly replace one surface cell with fire, then let the quenched steam
+    // disperse. It may boil nearby water, but must not become a perpetual heat
+    // source that propagates through the entire pool.
+    w.paint(10, 5, Fire);
+    let water_before = count(&w, Water);
+    for _ in 0..120 {
+        w.step();
+        let water = count(&w, Water);
+        if water < water_before * 3 / 4 {
+            return Err(format!(
+                "brief fire vaporized too much of the pool (before={water_before}, remaining={water})"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn hot_glass_shatters_in_cold_water() -> Result<(), String> {
     let mut w = World::new(5, 5);
     // Support glass from below; keep water beside it (not under — glass falls into fluids).
@@ -1638,6 +1679,125 @@ fn liquid_nitrogen_thermal_shock() -> Result<(), String> {
     Err("no material experienced thermal shock from liquid nitrogen".into())
 }
 
+fn atmos_oxygen_depletion_puts_out_fire() -> Result<(), String> {
+    let mut w = World::new(5, 5);
+    // Fully sealed box — atmosphere will deplete O₂.
+    for y in 0..5 {
+        for x in 0..5 {
+            w.paint(x, y, Stone);
+        }
+    }
+    // Replace the centre with fire.
+    w.paint(2, 2, Fire);
+    // Set initial O₂ to a small amount so extinction is quick.
+    let fi = w.idx(2, 2);
+    w.air_mass_mut()[fi] = AMBIENT_AIR_MASS;
+    w.o2_mut()[fi] = 3; // barely any O₂
+
+    for _ in 0..10 {
+        w.step();
+    }
+    if count(&w, Fire) > 0 {
+        return Err("fire did not extinguish from O₂ depletion".into());
+    }
+    // Should have smoke or empty where fire was.
+    let cell = w.get(2, 2);
+    if cell != Smoke && cell != Empty {
+        return Err(format!("fire left unexpected residue: {cell:?}"));
+    }
+    Ok(())
+}
+
+fn atmos_ventilated_fire_burns_longer() -> Result<(), String> {
+    // Fire in open air (top edge) should have O₂ replenished via edge venting.
+    let mut w = World::new(7, 7);
+    w.paint(3, 0, Fire); // right at the open top edge
+    for _ in 0..20 {
+        w.step();
+    }
+    let fire_count = count(&w, Fire);
+    if fire_count == 0 {
+        return Err("ventilated fire died before 20 ticks".into());
+    }
+    Ok(())
+}
+
+fn atmos_disabled_toggle() -> Result<(), String> {
+    let mut w = World::new(5, 5);
+    // Disable atmosphere.
+    assert!(w.atmos_enabled(), "atmos should be enabled by default");
+    w.set_air_enabled(false);
+    assert!(!w.atmos_enabled(), "atmos should be disabled");
+    w.toggle_atmos();
+    assert!(w.atmos_enabled(), "atmos should be re-enabled");
+    w.toggle_atmos();
+    assert!(!w.atmos_enabled(), "atmos should be disabled again");
+
+    // State is preserved while disabled.
+    let fi = w.idx(2, 2);
+    w.air_mass_mut()[fi] = 123;
+    w.o2_mut()[fi] = 45;
+    w.set_air_enabled(false);
+    for _ in 0..10 {
+        w.step();
+    }
+    assert_eq!(w.air_mass()[fi], 123, "air mass preserved while disabled");
+    assert_eq!(w.o2()[fi], 45, "O₂ preserved while disabled");
+    Ok(())
+}
+
+fn atmos_explosion_adds_heat_and_pressure() -> Result<(), String> {
+    let mut w = World::new(11, 11);
+    let (cx, cy) = (5, 5);
+    w.paint(cx, cy, Tnt);
+    w.paint(cx, cy - 1, Fire);
+
+    let fi = w.idx(5, 5);
+    let temp_before = w.temp()[fi];
+    let mass_before = w.air_mass()[fi];
+
+    w.step(); // explosion happens
+
+    let temp_after = w.temp()[fi];
+    let mass_after = w.air_mass()[fi];
+    if temp_after <= temp_before {
+        return Err(format!(
+            "explosion did not add heat (before={temp_before}, after={temp_after})"
+        ));
+    }
+    if mass_after <= mass_before {
+        return Err(format!(
+            "explosion did not increase air mass (before={mass_before}, after={mass_after})"
+        ));
+    }
+    Ok(())
+}
+
+fn atmosphere_round_trip_scene_state() -> Result<(), String> {
+    let mut w = World::new(5, 5);
+    w.paint(2, 2, Fire);
+    let fi = w.idx(2, 2);
+    w.air_mass_mut()[fi] = AMBIENT_AIR_MASS;
+    w.o2_mut()[fi] = AMBIENT_O2 - 5;
+    w.exhaust_mut()[fi] = 10;
+    w.fuel_vapor_mut()[fi] = 3;
+
+    let state = crate::scene_manager::SceneState::from_world(&w, "atmos_test".into());
+    let mut restored = World::new(5, 5);
+    restored.restore_from(&state);
+
+    let ri = restored.idx(2, 2);
+    assert_eq!(
+        restored.air_mass()[ri],
+        AMBIENT_AIR_MASS,
+        "air mass round trip"
+    );
+    assert_eq!(restored.o2()[ri], AMBIENT_O2 - 5, "O₂ round trip");
+    assert_eq!(restored.exhaust()[ri], 10, "exhaust round trip");
+    assert_eq!(restored.fuel_vapor()[ri], 3, "fuel vapor round trip");
+    Ok(())
+}
+
 /// The full list of selftest checks: (name, function) pairs.
 /// Exposed publicly so `cargo test` can run them without duplication.
 pub fn tests() -> &'static [(&'static str, Test)] {
@@ -1781,12 +1941,33 @@ pub fn tests() -> &'static [(&'static str, Test)] {
         ),
         ("water_boils_above_100", water_boils_above_100),
         (
+            "brief_fire_does_not_vaporize_pool",
+            brief_fire_does_not_vaporize_pool,
+        ),
+        (
             "hot_glass_shatters_in_cold_water",
             hot_glass_shatters_in_cold_water,
         ),
         ("sealed_fire_suffocates", sealed_fire_suffocates),
         ("blast_moves_sand_outward", blast_moves_sand_outward),
         ("preset_scenes_load_and_run", preset_scenes_load_and_run),
+        (
+            "atmos_oxygen_depletion_puts_out_fire",
+            atmos_oxygen_depletion_puts_out_fire,
+        ),
+        (
+            "atmos_ventilated_fire_burns_longer",
+            atmos_ventilated_fire_burns_longer,
+        ),
+        ("atmos_disabled_toggle", atmos_disabled_toggle),
+        (
+            "atmos_explosion_adds_heat_and_pressure",
+            atmos_explosion_adds_heat_and_pressure,
+        ),
+        (
+            "atmosphere_round_trip_scene_state",
+            atmosphere_round_trip_scene_state,
+        ),
     ]
 }
 

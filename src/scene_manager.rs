@@ -25,9 +25,27 @@ pub struct SceneState {
     /// Fractional vertical displacement in quarter-cell units.
     #[serde(default)]
     pub y_frac: Vec<i8>,
+    /// Fractional horizontal velocity in quarter-cell units.
+    #[serde(default)]
+    pub vx_frac: Vec<i8>,
+    /// Fractional horizontal displacement in quarter-cell units.
+    #[serde(default)]
+    pub x_frac: Vec<i8>,
     /// Optional for backward compatibility with older scene files.
     #[serde(default)]
     pub temp: Vec<i16>,
+    /// Atmosphere: air mass (fixed-point).
+    #[serde(default)]
+    pub air_mass: Vec<i16>,
+    /// Atmosphere: oxygen component.
+    #[serde(default)]
+    pub o2: Vec<i16>,
+    /// Atmosphere: exhaust (CO2, etc.) component.
+    #[serde(default)]
+    pub exhaust: Vec<i16>,
+    /// Atmosphere: fuel vapor component.
+    #[serde(default)]
+    pub fuel_vapor: Vec<i16>,
     pub saved_at: u64,
 }
 
@@ -41,7 +59,13 @@ impl SceneState {
         let vy = world.vy().to_vec();
         let vy_frac = world.vy_frac().to_vec();
         let y_frac = world.y_frac().to_vec();
+        let vx_frac = world.vx_frac().to_vec();
+        let x_frac = world.x_frac().to_vec();
         let temp = world.temp().to_vec();
+        let air_mass = world.air_mass().to_vec();
+        let o2 = world.o2().to_vec();
+        let exhaust = world.exhaust().to_vec();
+        let fuel_vapor = world.fuel_vapor().to_vec();
         Self {
             name,
             width: world.width,
@@ -53,7 +77,13 @@ impl SceneState {
             vy,
             vy_frac,
             y_frac,
+            vx_frac,
+            x_frac,
             temp,
+            air_mass,
+            o2,
+            exhaust,
+            fuel_vapor,
             saved_at: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
@@ -203,7 +233,13 @@ mod tests {
             vy: vec![0; 16],
             vy_frac: vec![0; 16],
             y_frac: vec![0; 16],
+            vx_frac: vec![0; 16],
+            x_frac: vec![0; 16],
             temp: vec![20; 16],
+            air_mass: vec![64; 16],
+            o2: vec![13; 16],
+            exhaust: vec![0; 16],
+            fuel_vapor: vec![0; 16],
             saved_at: 0,
         }
     }
@@ -285,6 +321,8 @@ mod tests {
         state.vy[3] = i8::MAX;
         state.vy_frac[3] = i8::MIN;
         state.y_frac[3] = i8::MAX;
+        state.vx_frac[3] = i8::MIN;
+        state.x_frac[3] = i8::MAX;
         let mut world = World::new(4, 4);
 
         world.restore_from(&state);
@@ -292,6 +330,8 @@ mod tests {
         assert_eq!(world.velocity_at(3, 0), (-4, 4));
         assert_eq!(world.vy_frac()[3], -3);
         assert_eq!(world.y_frac()[3], 3);
+        assert_eq!(world.vx_frac()[3], -3);
+        assert_eq!(world.x_frac()[3], 3);
     }
 
     #[test]
@@ -314,6 +354,8 @@ mod tests {
         assert!(state.vy.is_empty());
         assert!(state.vy_frac.is_empty());
         assert!(state.y_frac.is_empty());
+        assert!(state.vx_frac.is_empty());
+        assert!(state.x_frac.is_empty());
         let mut world = World::new(2, 1);
         world.restore_from(&state);
         assert_eq!(world.velocity_at(0, 0), (0, 0));

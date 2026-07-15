@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear},
 };
 
-use crate::app::{App, Confirm, EditorTool};
+use crate::app::{App, AtmosOverlay, Confirm, EditorTool};
 use crate::material::Material;
 use crate::world::World;
 
@@ -33,6 +33,48 @@ pub fn draw(frame: &mut Frame, world: &World, app: &App) {
     // Confirmation dialog drawn last (on top).
     if app.confirm != Confirm::None {
         draw_confirmation(frame, &area, app);
+    }
+}
+
+fn overlay_color(world: &World, overlay: AtmosOverlay, x: usize, y: usize) -> Option<Color> {
+    let scale = |value: i32, max: i32| (value.clamp(0, max) * 255 / max) as u8;
+    match overlay {
+        AtmosOverlay::None => None,
+        AtmosOverlay::Pressure => {
+            let pressure = world.pressure_at(x, y);
+            if pressure <= 256 {
+                let v = scale(pressure, 256);
+                Some(Color::Rgb(v / 3, v / 2, v))
+            } else {
+                let v = scale(pressure - 256, 768);
+                Some(Color::Rgb(128 + v / 2, 80u8.saturating_sub(v / 4), 32))
+            }
+        }
+        AtmosOverlay::Oxygen => {
+            let (_, oxygen, _, _) = world.atmosphere_at(x, y);
+            let v = scale(oxygen as i32, 26);
+            Some(Color::Rgb(0, v, v))
+        }
+        AtmosOverlay::Fuel => {
+            let (_, _, fuel, _) = world.atmosphere_at(x, y);
+            let v = scale(fuel as i32, 64);
+            Some(Color::Rgb(v, v / 2, 0))
+        }
+        AtmosOverlay::Exhaust => {
+            let (_, _, _, exhaust) = world.atmosphere_at(x, y);
+            let v = scale(exhaust as i32, 64);
+            Some(Color::Rgb(v / 2, v / 3, v))
+        }
+        AtmosOverlay::Temperature => {
+            let temp = world.temp_at(x, y) as i32;
+            if temp <= 20 {
+                let v = scale(temp + 200, 220);
+                Some(Color::Rgb(0, v / 2, v))
+            } else {
+                let v = scale(temp - 20, 980);
+                Some(Color::Rgb(v, 64u8.saturating_sub(v / 4), 0))
+            }
+        }
     }
 }
 
@@ -77,17 +119,24 @@ fn draw_grid(frame: &mut Frame, world: &World, app: &App, area: &Rect) {
             let top_color = ghost_top
                 .map(|(material, life, seed, _)| material.color(seed, life, tick))
                 .unwrap_or_else(|| {
-                    let (material, seed, life) = world.render_state(wx as usize, top_y as usize);
-                    material.color(seed, life, tick)
+                    overlay_color(world, app.atmos_overlay, wx as usize, top_y as usize)
+                        .unwrap_or_else(|| {
+                            let (material, seed, life) =
+                                world.render_state(wx as usize, top_y as usize);
+                            material.color(seed, life, tick)
+                        })
                 });
             if let Some(bottom_y) = bottom_y {
                 let ghost_bottom = app.paste_ghost_at(wx, bottom_y, world.width, world.height);
                 let bottom_color = ghost_bottom
                     .map(|(material, life, seed, _)| material.color(seed, life, tick))
                     .unwrap_or_else(|| {
-                        let (material, seed, life) =
-                            world.render_state(wx as usize, bottom_y as usize);
-                        material.color(seed, life, tick)
+                        overlay_color(world, app.atmos_overlay, wx as usize, bottom_y as usize)
+                            .unwrap_or_else(|| {
+                                let (material, seed, life) =
+                                    world.render_state(wx as usize, bottom_y as usize);
+                                material.color(seed, life, tick)
+                            })
                     });
                 cell.set_char('▀');
                 cell.set_fg(top_color);
@@ -143,6 +192,7 @@ fn status_text(app: &App) -> String {
         .unwrap_or_default();
     let dirty = if app.dirty { " ●" } else { "" };
     let paused = if app.paused { "Paused" } else { "Running" };
+    let overlay = format!(" · Overlay {}", app.atmos_overlay.name());
     let coords = app
         .mouse_world
         .map(|(x, y)| format!(" · {x},{y}"))
@@ -152,10 +202,10 @@ fn status_text(app: &App) -> String {
     } else if app.selection.is_some() {
         "Ctrl+C Copy · Ctrl+X Cut · Del Delete · Esc Brush"
     } else {
-        "Tab Materials · E Tools · B Brush · S Scenes · Space Pause · Wheel Zoom · Esc Quit"
+        "Tab Materials · E Tools · B Brush · S Scenes · A Air · O Overlay · Space Pause · Wheel Zoom · Esc Quit"
     };
     format!(
-        "  ▀ {} · {} {} r{}{}{} · {}{} · {}{}  │  {}",
+        "  ▀ {} · {} {} r{}{}{} · {}{} · {}{}{}  │  {}",
         app.selected.name(),
         app.tool.name(),
         app.brush_shape.name(),
@@ -165,6 +215,7 @@ fn status_text(app: &App) -> String {
         app.scene_name,
         dirty,
         paused,
+        overlay,
         coords,
         controls,
     )
