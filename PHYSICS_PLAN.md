@@ -1,34 +1,58 @@
-# Physics Sandbox — Master Physics Plan
+# Physics Rewrite Plan
 
-Current state: cellular-automaton sandbox with ~30 materials, heat diffusion,
-combustion, melting, explosions, and basic structural collapse.
+**Build order: B → C → A.** Velocity is the shared foundation; pressure depends
+on movement; explosions depend on both.
 
-## Phase B: Velocity & Force (do first)
+## Phase B — Velocity and Movement
 
-Per-cell velocity (vx, vy). Gravity accelerates falling grains; buoyancy lifts
-gases; drag caps terminal speed; collisions bounce/slide/dampen. Replaces
-hard-coded fall_speed_of / spread_of / fling_outward magic numbers with natural
-momentum. Everything downstream benefits.
+Add persistent per-cell integer velocity (`vx`, `vy`, capped at ±4).
 
-## Phase C: Air / Wind
+- Gravity for powders, liquids, embers, and sparks.
+- Buoyancy for fire, smoke, and steam.
+- Bresenham traversal for fast movement without tunneling.
+- Direction-aware displacement: dense materials sink, light materials rise, and
+  horizontal movement requires empty space.
+- Simple collision responses, drag, liquid leveling, powder avalanche, and gas
+  ceiling spread.
+- Run lifecycle and reactions before movement every tick.
+- Replace `fall_speed_of`, `spread_of`, `flow`, and manual rise/fall logic.
 
-Per-cell pressure scalar. Heat sources expand air; gases compress; pressure
-gradients create wind that pushes loose materials and feeds/fights fire.
-Steam explosions, smoke columns, fire drafts.
+**Done when:** existing materials still react and expire correctly while movement
+uses velocity exclusively.
 
-## Phase A: Explosion Perfection
+## Phase C — Air and Pressure
 
-Shockwave propagation over multiple ticks (not instant). Chain reactions.
-Structural-component push from blast pressure. Shaped charges. All built on
-top of velocity + pressure.
+Add a low-resolution pressure grid updated independently from material cells.
 
-Build order regardless of the letter labels: **B (velocity) → C (air/pressure)
-→ A (explosions)** — each phase depends on the one before it.
+- Pressure diffuses between neighboring regions.
+- Fire and explosions increase local pressure.
+- Open space equalizes pressure; sealed rooms retain it.
+- Pressure gradients apply velocity to gases, liquids, and loose particles.
+- Avoid full fluid simulation, temperature coupling, or per-cell air particles.
 
----
+**Done when:** smoke follows drafts, openings vent pressure, and enclosed blasts
+are stronger than open-air blasts.
 
-Each phase should be:
-- Simple: one clear concept, not a research paper
-- Fast: no per-tick allocations, O(cells) with small constants
-- Realistic: emergent behavior, not scripted
-- Discrete: cell-grid native, no floating-point coordinates
+## Phase A — Explosions and Structural Impacts
+
+Build explosions from velocity and pressure instead of directly relocating cells.
+
+- Blast creates radial pressure and heat.
+- Pressure accelerates movable debris.
+- Structural components receive impulse and accumulated damage.
+- Unsupported or over-damaged structures detach, fall, and collide.
+- Different explosives vary by pressure, heat, radius, and duration.
+- Remove `fling_outward` and other explosion-specific movement hacks.
+
+**Done when:** blasts propagate through openings, throw debris, damage nearby
+structures, and behave differently in sealed versus open spaces.
+
+## Shared Rules
+
+- Velocity travels with material state.
+- Newly created material starts with zero velocity unless explicitly given an
+  impulse.
+- Every material receives lifecycle and reaction processing once per tick.
+- Movement is bounded and allocation-free.
+- Each phase preserves scene loading, undo, resizing, chunk activation, and
+  deterministic self-tests.
