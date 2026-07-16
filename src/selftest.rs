@@ -86,7 +86,10 @@ fn water_prefers_route_to_lower_space() -> Result<(), String> {
     for _ in 0..3 {
         w.step();
     }
-    if w.get(8, 3) != Water {
+    // Hydrostatic surface preference should send the cell toward the nearby
+    // hole; unit lateral velocity may already have dropped it through.
+    let reached_outlet = (0..w.height).any(|y| w.get(8, y) == Water);
+    if !reached_outlet {
         return Err("water did not choose the nearby downward outlet".into());
     }
     Ok(())
@@ -512,9 +515,7 @@ fn fire_produces_smoke() -> Result<(), String> {
 }
 
 /// Water poured as a tall column should collapse and level out into a flat,
-/// shallow layer across the whole basin (the horizontal-dispersion/flow fix).
-/// With only one-cell-per-tick flow it stays heaped near the source for a long
-/// time; the multi-cell flow flattens it quickly.
+/// shallow layer across the whole basin via hydrostatic lateral velocity.
 fn water_levels_out() -> Result<(), String> {
     let mut w = World::new(30, 12);
     for y in 0..12 {
@@ -562,9 +563,10 @@ fn water_levels_out() -> Result<(), String> {
 fn renders_grid_colors() -> Result<(), String> {
     use ratatui::{Terminal, backend::TestBackend};
 
-    // Half-block rendering packs two world rows into each terminal row, so an
-    // 8-row terminal yields 14 world rows (7 grid rows + status line).
-    let mut w = World::new(16, 14);
+    // Half-block rendering packs two world rows into each terminal row. An 8-row
+    // terminal reserves MAX_STATUS_ROWS for the status bar, leaving 5 grid rows
+    // => 10 world rows. Keep a bit of slack below for floor paints.
+    let mut w = World::new(16, 10);
     w.paint(1, 2, Sand);
     w.paint(2, 2, Water);
     w.paint(3, 2, Stone);
@@ -641,12 +643,11 @@ fn renders_picker() -> Result<(), String> {
             .collect::<String>()
     };
 
-    // closed: no "Materials" anywhere on screen (skip status bar rows)
+    // closed: no "Materials" anywhere on screen (skip reserved status bar rows)
     let app = App::default();
     term.draw(|f| crate::ui::draw(f, &w, &app))
         .map_err(|e| e.to_string())?;
-    let sr = crate::ui::status_rows(&app, 40);
-    for y in 0..(20 - sr) {
+    for y in 0..(20 - crate::ui::MAX_STATUS_ROWS) {
         if row_text(term.backend().buffer(), y).contains("Materials") {
             return Err("picker title shown while closed".into());
         }
@@ -1423,14 +1424,19 @@ fn liquid_nitrogen_freezes_and_extinguishes() -> Result<(), String> {
 fn c4_blast_respects_structural_materials() -> Result<(), String> {
     let mut w = World::new(31, 31);
     let (cx, cy) = (15, 15);
-    // Shelf so stone/glass don't freefall before the blast resolves.
+    // Shelves so unsupported solids don't freefall before the blast resolves.
+    // Fragile and resistant targets sit on opposite sides so hard walls do not
+    // block LOS to glass/stone under the new inside-out blast model.
     for x in (cx + 6)..=(cx + 10) {
+        w.paint(x, cy + 1, Metal);
+    }
+    for x in (cx - 10)..=(cx - 6) {
         w.paint(x, cy + 1, Metal);
     }
     w.paint(cx + 10, cy, Stone);
     w.paint(cx + 8, cy, Glass);
-    w.paint(cx + 7, cy, Metal);
-    w.paint(cx + 6, cy, Concrete);
+    w.paint(cx - 7, cy, Metal);
+    w.paint(cx - 6, cy, Concrete);
     w.paint(cx, cy, C4);
     w.paint(cx, cy - 1, Fire);
     w.step();
@@ -1438,7 +1444,7 @@ fn c4_blast_respects_structural_materials() -> Result<(), String> {
     if w.get(cx + 10, cy) == Stone || w.get(cx + 8, cy) != BrokenGlass {
         return Err("C4 did not damage stone and shatter glass".into());
     }
-    if w.get(cx + 7, cy) != Metal || w.get(cx + 6, cy) != Concrete {
+    if w.get(cx - 7, cy) != Metal || w.get(cx - 6, cy) != Concrete {
         return Err("blast-resistant material was destroyed".into());
     }
     Ok(())
@@ -1576,7 +1582,7 @@ fn sealed_fire_suffocates() -> Result<(), String> {
         }
     }
     sealed.paint(2, 2, Fire);
-    for _ in 0..8 {
+    for _ in 0..120 {
         sealed.step();
     }
     if count(&sealed, Fire) > 0 {
@@ -1592,17 +1598,20 @@ fn blast_moves_sand_outward() -> Result<(), String> {
     for x in 0..21 {
         w.paint(x, 10, Stone);
     }
-    // Sand column just outside the charge, with empty room further out.
-    for x in 7..11 {
-        w.paint(x, cy, Sand);
-    }
+    // Single sand grain just outside the soft-destruction core, with empty
+    // room further out. A pile can pass this check via ordinary avalanche
+    // spreading without any blast impulse.
+    w.paint(cx + 3, cy, Sand);
     let max_before = (0..w.width)
         .filter(|&x| w.get(x, cy) == Sand)
         .max()
         .unwrap_or(0);
     w.paint(cx, cy, Gunpowder);
     w.paint(cx, cy - 1, Fire);
-    w.step();
+    // Impulse is applied on the detonation tick; velocity then moves grains.
+    for _ in 0..8 {
+        w.step();
+    }
 
     let max_after = (0..w.width)
         .filter(|&x| (0..w.height).any(|y| w.get(x, y) == Sand))
@@ -1610,7 +1619,25 @@ fn blast_moves_sand_outward() -> Result<(), String> {
         .unwrap_or(0);
     if max_after <= max_before {
         return Err(format!(
-            "blast did not fling sand outward (max x before={max_before}, after={max_after})"
+            "blast did not throw sand outward (max x before={max_before}, after={max_after})"
+        ));
+    }
+    Ok(())
+}
+
+fn gunpowder_shatters_nearby_glass() -> Result<(), String> {
+    let mut w = World::new(11, 7);
+    let (cx, cy) = (3, 3);
+    // Support so glass does not freefall before the blast resolves.
+    w.paint(cx + 2, cy + 1, Metal);
+    w.paint(cx + 2, cy, Glass);
+    w.paint(cx, cy, Gunpowder);
+    w.paint(cx, cy - 1, Fire);
+    w.step();
+    if w.get(cx + 2, cy) != BrokenGlass {
+        return Err(format!(
+            "gunpowder did not shatter nearby glass (got {})",
+            w.get(cx + 2, cy).name()
         ));
     }
     Ok(())
@@ -1694,7 +1721,7 @@ fn atmos_oxygen_depletion_puts_out_fire() -> Result<(), String> {
     w.air_mass_mut()[fi] = AMBIENT_AIR_MASS;
     w.o2_mut()[fi] = 3; // barely any O₂
 
-    for _ in 0..10 {
+    for _ in 0..40 {
         w.step();
     }
     if count(&w, Fire) > 0 {
@@ -1950,6 +1977,10 @@ pub fn tests() -> &'static [(&'static str, Test)] {
         ),
         ("sealed_fire_suffocates", sealed_fire_suffocates),
         ("blast_moves_sand_outward", blast_moves_sand_outward),
+        (
+            "gunpowder_shatters_nearby_glass",
+            gunpowder_shatters_nearby_glass,
+        ),
         ("preset_scenes_load_and_run", preset_scenes_load_and_run),
         (
             "atmos_oxygen_depletion_puts_out_fire",

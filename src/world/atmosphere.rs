@@ -91,41 +91,84 @@ impl World {
         }
     }
 
-    /// Fire consumes local O₂ each tick.  If no O₂ remains, fire extinguishes
-    /// to Smoke.  When fuel vapor is present and O₂ > 0, burn it for extra
-    /// heat and overpressure.
+    /// Local oxygen concentration as a percentage of air mass.
+    pub(super) fn oxygen_percent(&self, i: usize) -> i32 {
+        let air = self.air_mass[i] as i32;
+        if air <= 0 {
+            0
+        } else {
+            self.o2[i] as i32 * 100 / air
+        }
+    }
+
+    /// Heat emitted by a flame at its current oxygen stage.
+    pub(super) fn fire_heat(&self, i: usize) -> i16 {
+        if !self.atmos_enabled {
+            return 900;
+        }
+        match self.oxygen_percent(i) {
+            percent if percent < CRITICAL_OXYGEN_PERCENT => 250,
+            percent if percent < LOW_OXYGEN_PERCENT => 500,
+            _ => 900,
+        }
+    }
+
+    /// Fire consumes the effective 2.5D oxygen reserve gradually. Flames beside
+    /// combustible fuel draw the full budget; free flames draw half as much.
+    /// Low oxygen weakens combustion, while critical starvation shortens flame
+    /// life over several dozen ticks instead of extinguishing it immediately.
     fn atmos_fire_burn(&mut self, x: usize, y: usize, i: usize) {
-        let o2 = self.o2[i];
-        if o2 <= 0 {
-            // Check neighbours for O₂ we can draw.
-            let drawn = self.draw_o2_from_neighbors(x, y, MAX_TRANSPORT);
-            if drawn <= 0 {
-                // No O₂ anywhere → extinguish to smoke.
+        if self.oxygen_percent(i) < CRITICAL_OXYGEN_PERCENT {
+            self.draw_o2_from_neighbors(x, y, 1);
+        }
+
+        let oxygen_percent = self.oxygen_percent(i);
+        if oxygen_percent < CRITICAL_OXYGEN_PERCENT {
+            self.life[i] = self.life[i].saturating_sub(CRITICAL_FIRE_LIFE_LOSS);
+            if self.life[i] == 0 {
                 let min_life = SMOKE_LIFE_MIN / 2;
                 let life_span = SMOKE_LIFE_MAX / 2 - min_life;
                 let life = min_life + (self.roll(x, y, 0xA7) as u16 * life_span / 999);
                 self.put(i, Smoke, life);
-                return;
             }
+            return;
         }
 
-        // Consume oxygen gradually so ventilation can sustain an open flame.
-        let consume = 2.min(self.o2[i]);
-        self.o2[i] = clamp_mass(self.o2[i].saturating_sub(consume));
-        self.exhaust[i] = clamp_mass(self.exhaust[i].saturating_add(consume));
+        let beside_fuel = self
+            .n8(x, y)
+            .into_iter()
+            .flatten()
+            .any(|(nx, ny)| self.grid[self.idx(nx, ny)].flammable());
+        let interval = if beside_fuel {
+            FIRE_OXYGEN_INTERVAL
+        } else {
+            FREE_FLAME_OXYGEN_INTERVAL
+        };
+        let interval = if oxygen_percent < LOW_OXYGEN_PERCENT {
+            interval * 2
+        } else {
+            interval
+        };
+        if self.tick.wrapping_add(i as u64).is_multiple_of(interval) {
+            let consume = 1.min(self.o2[i]);
+            self.o2[i] = clamp_mass(self.o2[i].saturating_sub(consume));
+            self.exhaust[i] = clamp_mass(self.exhaust[i].saturating_add(consume));
+        }
 
-        // If fuel vapor is present, burn it for extra energy.
+        // Fuel vapor remains energetic, but its effective depth limits the burn
+        // front to one fixed-point unit per tick.
         let vapor = self.fuel_vapor[i];
         if vapor > 0 {
-            let burn = MAX_TRANSPORT.min(vapor).min(self.o2[i]);
+            let burn = (MAX_TRANSPORT / COMBUSTION_DEPTH as i16)
+                .max(1)
+                .min(vapor)
+                .min(self.o2[i]);
             if burn > 0 {
                 self.fuel_vapor[i] = clamp_mass(self.fuel_vapor[i].saturating_sub(burn));
                 self.o2[i] = clamp_mass(self.o2[i].saturating_sub(burn));
                 self.exhaust[i] =
                     clamp_mass(self.exhaust[i].saturating_add(burn.saturating_mul(2)));
-                // Heat pulse.
                 self.temp[i] = (self.temp[i] as i32 + burn as i32 * 8).clamp(-200, 1_500) as i16;
-                // Overpressure: bounded air‑mass increase.
                 let overpressure = (burn as i16).min(MAX_AIR_MASS.saturating_sub(self.air_mass[i]));
                 if overpressure > 0 {
                     self.air_mass[i] = clamp_mass(self.air_mass[i].saturating_add(overpressure));
@@ -500,7 +543,7 @@ impl World {
     }
 
     /// Apply a horizontal impulse to `vx_frac` (quarter‑cell units).
-    fn apply_horizontal_impulse(&mut self, i: usize, impulse: i8, _m: Material) {
+    pub(super) fn apply_horizontal_impulse(&mut self, i: usize, impulse: i8, _m: Material) {
         let fixed = (self.vx[i] as i16) * (VELOCITY_SCALE as i16) + (self.vx_frac[i] as i16);
         let max_fixed = (MAX_VELOCITY as i16) * (VELOCITY_SCALE as i16);
         let new_fixed = (fixed + impulse as i16).clamp(-max_fixed, max_fixed);
@@ -510,7 +553,7 @@ impl World {
     }
 
     /// Apply a vertical impulse to `vy_frac` (quarter‑cell units).
-    fn apply_vertical_impulse(&mut self, i: usize, impulse: i8, _m: Material) {
+    pub(super) fn apply_vertical_impulse(&mut self, i: usize, impulse: i8, _m: Material) {
         let fixed = (self.vy[i] as i16) * (VELOCITY_SCALE as i16) + (self.vy_frac[i] as i16);
         let max_fixed = (MAX_VELOCITY as i16) * (VELOCITY_SCALE as i16);
         let new_fixed = (fixed + impulse as i16).clamp(-max_fixed, max_fixed);
@@ -519,8 +562,11 @@ impl World {
         self.activate_idx(i);
     }
 
-    /// Add atmospheric pressure/heat from an explosion at (x, y).
-    pub(super) fn explode_atmos_effect(&mut self, x: usize, y: usize, radius: i32) {
+    /// Inject overpressure (extra air mass) from an explosion. Heat is applied by
+    /// `explode` itself; this only drives the atmospheric pressure wave through
+    /// passable cells with line of sight to the epicentre.
+    pub(super) fn explode_atmos_effect(&mut self, x: usize, y: usize, profile: BlastProfile) {
+        let radius = profile.radius;
         let r2 = radius * radius;
         for dy in -radius..=radius {
             for dx in -radius..=radius {
@@ -531,13 +577,23 @@ impl World {
                 let Some((tx, ty)) = self.adj(x, y, dx, dy) else {
                     continue;
                 };
+                if dist2 > 0 && !self.blast_has_line_of_sight(x, y, tx, ty) {
+                    continue;
+                }
                 let ti = self.idx(tx, ty);
                 if !cell_is_passable(self.grid[ti]) {
                     continue;
                 }
-                // Add compressed ambient-composition air and heat.
-                let blast_mass = ((AMBIENT_AIR_MASS as i32 * (r2 - dist2) * 2 / (r2 + 1))
-                    .max(AMBIENT_AIR_MASS as i32 / 4)) as i16;
+                let strength = if dist2 == 0 {
+                    1000
+                } else {
+                    let linear = (r2 - dist2) * 1000 / r2.max(1);
+                    linear.max(350)
+                };
+                // profile.pressure is in ambient-mass units at the epicentre.
+                let blast_mass = ((AMBIENT_AIR_MASS as i32 * profile.pressure as i32 * strength)
+                    / 1000)
+                    .max(AMBIENT_AIR_MASS as i32 / 4) as i16;
                 let old_mass = self.air_mass[ti];
                 let new_mass = clamp_mass(old_mass.saturating_add(blast_mass));
                 let added_mass = new_mass - old_mass;
@@ -545,10 +601,6 @@ impl World {
                 let added_o2 =
                     (added_mass as i32 * AMBIENT_O2 as i32 / AMBIENT_AIR_MASS as i32) as i16;
                 self.o2[ti] = clamp_mass(self.o2[ti].saturating_add(added_o2));
-                // Heat pulse.
-                let blast_heat = ((r2 - dist2) * 300 / (r2 + 1)) as i16;
-                self.temp[ti] =
-                    (self.temp[ti] as i32 + blast_heat as i32).clamp(-200, 1_500) as i16;
                 self.activate_next(tx, ty);
             }
         }
@@ -612,12 +664,11 @@ mod tests {
     // ── Oxygen depletion and fire extinguishing ──────────────────────
 
     #[test]
-    fn oxygen_depletion_puts_out_fire() {
+    fn critical_oxygen_weakens_before_eventually_extinguishing_fire() {
         let mut w = World::new(3, 3);
         let fi = w.idx(1, 1);
         w.grid[fi] = Fire;
         w.life[fi] = 100;
-        // Seal the cell: all neighbours are stone.
         for x in 0..3 {
             for y in 0..3 {
                 if !(x == 1 && y == 1) {
@@ -626,20 +677,48 @@ mod tests {
                 }
             }
         }
-        // Zero O₂ in the fire cell.
         w.air_mass[fi] = AMBIENT_AIR_MASS;
         w.o2[fi] = 0;
 
-        for _ in 0..5 {
+        for _ in 0..20 {
             w.atmos_fire_burn(1, 1, fi);
+        }
+        assert_eq!(
+            w.grid[fi], Fire,
+            "critical oxygen should not kill fire immediately"
+        );
+        assert_eq!(
+            w.fire_heat(fi),
+            250,
+            "critical oxygen should sharply reduce heat"
+        );
+
+        for _ in 0..30 {
             if w.grid[fi] != Fire {
                 break;
             }
+            w.atmos_fire_burn(1, 1, fi);
         }
-        assert_ne!(
-            w.grid[fi], Fire,
-            "fire should extinguish when O₂ is zero and no neighbours can supply it"
+        assert_eq!(
+            w.grid[fi], Smoke,
+            "sustained critical oxygen should extinguish fire"
         );
+    }
+
+    #[test]
+    fn low_oxygen_reduces_heat_without_shortening_flame_life() {
+        let mut w = World::new(3, 3);
+        let fi = w.idx(1, 1);
+        w.grid[fi] = Fire;
+        w.life[fi] = 100;
+        w.air_mass[fi] = AMBIENT_AIR_MASS;
+        w.o2[fi] = 6;
+
+        w.atmos_fire_burn(1, 1, fi);
+
+        assert_eq!(w.grid[fi], Fire);
+        assert_eq!(w.life[fi], 100);
+        assert_eq!(w.fire_heat(fi), 500);
     }
 
     #[test]
@@ -648,6 +727,8 @@ mod tests {
         let fi = w.idx(1, 1);
         w.grid[fi] = Fire;
         w.life[fi] = 100;
+        let fuel = w.idx(2, 1);
+        w.grid[fuel] = Wood;
         w.air_mass[fi] = AMBIENT_AIR_MASS;
         w.o2[fi] = AMBIENT_O2;
         w.exhaust[fi] = 0;
@@ -689,6 +770,79 @@ mod tests {
             .map(|(nx, ny)| w.o2[w.idx(nx, ny)])
             .sum();
         assert_eq!(neighbours_before - neighbours_after, drawn);
+    }
+
+    #[test]
+    fn ventilation_materially_extends_burning() {
+        let mut sealed = World::new(3, 3);
+        let si = sealed.idx(1, 1);
+        sealed.grid[si] = Fire;
+        sealed.life[si] = 100;
+        sealed.o2[si] = 0;
+        for y in 0..3 {
+            for x in 0..3 {
+                if (x, y) != (1, 1) {
+                    let i = sealed.idx(x, y);
+                    sealed.grid[i] = Stone;
+                }
+            }
+        }
+
+        let mut ventilated = World::new(3, 3);
+        let vi = ventilated.idx(1, 1);
+        ventilated.grid[vi] = Fire;
+        ventilated.life[vi] = 100;
+        ventilated.o2[vi] = 0;
+
+        for tick in 0..50 {
+            sealed.tick = tick;
+            ventilated.tick = tick;
+            if sealed.grid[si] == Fire {
+                sealed.atmos_fire_burn(1, 1, si);
+            }
+            ventilated.atmos_fire_burn(1, 1, vi);
+        }
+
+        assert_eq!(sealed.grid[si], Smoke, "sealed fire should suffocate");
+        assert_eq!(
+            ventilated.grid[vi], Fire,
+            "adjacent ventilated air should preserve the flame"
+        );
+        assert!(ventilated.life[vi] >= 90);
+    }
+
+    #[test]
+    fn enclosed_wood_fire_spreads_before_oxygen_runs_low() {
+        let mut w = World::new(7, 7);
+        for x in 0..7 {
+            w.paint(x, 0, Stone);
+            w.paint(x, 6, Stone);
+        }
+        for y in 1..6 {
+            w.paint(0, y, Stone);
+            w.paint(6, y, Stone);
+        }
+        w.paint(3, 2, Wood);
+        w.paint(3, 3, Fire);
+        let fire = w.idx(3, 3);
+        w.life[fire] = 100;
+
+        for tick in 0..48 {
+            w.tick = tick;
+            w.atmos_fire_burn(3, 3, fire);
+            assert_eq!(w.grid[fire], Fire, "enclosed flame died before spreading");
+            let effective_temp = w.effective_temp(3, 2);
+            if w.step_combustible(3, 2, effective_temp) {
+                break;
+            }
+            w.step_transport_atmos();
+        }
+
+        assert_eq!(
+            w.get(3, 2),
+            Ember,
+            "the enclosure's air reserve should sustain fire long enough to ignite wood"
+        );
     }
 
     // ── Fuel vapor transport / ignition ─────────────────────────────

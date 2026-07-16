@@ -675,28 +675,43 @@ impl World {
     ///   cannot be skipped.
     ///
     /// When a component is blocked, traversal stops after zeroing that velocity
-    /// component on the moving cell. The caller should proceed to legacy
-    /// movement when this returns false, or return early when it returns true.
+    /// component on the moving cell. Returns true if the cell changed position.
     pub(super) fn try_velocity_move(&mut self, x: usize, y: usize) -> bool {
         let i = self.idx(x, y);
         let vx = self.vx[i];
         let vy = self.vy[i];
+        let vx_frac = self.vx_frac[i];
+        let x_frac = self.x_frac[i];
         let vy_frac = self.vy_frac[i];
         let y_frac = self.y_frac[i];
 
-        // Compute effective vertical integer displacement.
-        let sum = (y_frac as i16) + (vy_frac as i16);
-        let carry = sum / (VELOCITY_SCALE as i16);
-        let new_y_frac = sum % (VELOCITY_SCALE as i16);
-        let dy = (vy as i16 + carry) as i8;
+        // Compute effective integer displacements from fixed-point state.
+        // Horizontal and vertical axes both use quarter-cell fractions so small
+        // blast/pressure impulses eventually produce whole-cell movement.
+        let x_sum = (x_frac as i16) + (vx_frac as i16);
+        let x_carry = x_sum / (VELOCITY_SCALE as i16);
+        let new_x_frac = x_sum % (VELOCITY_SCALE as i16);
+        let dx = (vx as i16 + x_carry) as i8;
 
-        // Write back updated y_frac before any movement.
+        let y_sum = (y_frac as i16) + (vy_frac as i16);
+        let y_carry = y_sum / (VELOCITY_SCALE as i16);
+        let new_y_frac = y_sum % (VELOCITY_SCALE as i16);
+        let dy = (vy as i16 + y_carry) as i8;
+
+        // Write back updated sub-cell positions before any movement.
+        self.x_frac[i] = new_x_frac as i8;
         self.y_frac[i] = new_y_frac as i8;
 
-        if vx == 0 && dy == 0 {
+        if dx == 0 && dy == 0 {
             // No integer movement this tick, but if sub-cell motion exists,
-            // keep the cell active so acceleration (gravity) continues.
-            if vy_frac != 0 || new_y_frac != 0 || vy != 0 {
+            // keep the cell active so acceleration (gravity/impulse) continues.
+            if vx != 0
+                || vy != 0
+                || vx_frac != 0
+                || vy_frac != 0
+                || new_x_frac != 0
+                || new_y_frac != 0
+            {
                 self.activate_idx(i);
             }
             return false;
@@ -708,9 +723,9 @@ impl World {
             return false;
         }
 
-        let sx = vx.signum() as i32;
+        let sx = dx.signum() as i32;
         let sy = dy.signum() as i32;
-        let adx = vx.unsigned_abs() as i32;
+        let adx = dx.unsigned_abs() as i32;
         let ady = dy.unsigned_abs() as i32;
         let steps = adx.max(ady);
 
@@ -838,29 +853,6 @@ impl World {
         let new_fixed = (fixed + f as i16).clamp(-max_fixed, max_fixed);
         self.vy[i] = (new_fixed / VELOCITY_SCALE as i16) as i8;
         self.vy_frac[i] = (new_fixed % VELOCITY_SCALE as i16) as i8;
-    }
-
-    /// Score horizontal room in one direction, preferring routes that lead to
-    /// a downward opening. This approximates local liquid pressure without a
-    /// separate pressure grid.
-    pub(super) fn flow_score(&self, x: usize, y: usize, dir: i32, range: usize) -> usize {
-        let mut cx = x;
-        for distance in 1..=range {
-            let Some((nx, _)) = self.adj(cx, y, dir, 0) else {
-                break;
-            };
-            if self.get(nx, y) != Empty {
-                break;
-            }
-            if self
-                .adj(nx, y, 0, 1)
-                .is_some_and(|(bx, by)| self.get(bx, by) == Empty)
-            {
-                return range + 1 - distance;
-            }
-            cx = nx;
-        }
-        0
     }
 
     pub(super) fn noise(&self, x: usize, y: usize, salt: u32) -> u32 {
@@ -1415,6 +1407,33 @@ mod tests {
     }
 
     #[test]
+    fn fractional_horizontal_impulse_accumulates_into_motion() {
+        let mut world = World::new(5, 3);
+        world.paint(1, 1, Sand);
+        let i = world.idx(1, 1);
+        // Half-cell impulse: must accumulate across ticks via x_frac before moving.
+        world.apply_horizontal_impulse(i, 2, Sand);
+
+        assert!(
+            !world.try_velocity_move(1, 1),
+            "first tick only advances x_frac"
+        );
+        assert_eq!(world.get(1, 1), Sand);
+        assert_eq!(world.x_frac[i], 2);
+        assert_eq!(world.vx_frac[i], 2);
+
+        assert!(
+            world.try_velocity_move(1, 1),
+            "second tick should carry one cell from accumulated frac"
+        );
+        assert_eq!(world.get(1, 1), Empty);
+        assert_eq!(world.get(2, 1), Sand);
+        let landed = world.idx(2, 1);
+        assert_eq!(world.x_frac[landed], 0);
+        assert_eq!(world.vx_frac[landed], 2);
+    }
+
+    #[test]
     fn velocity_driven_diagonal_traversal() {
         let mut world = World::new(6, 6);
         // Sand at (1,1) with velocity (3,2) visits (2,1), (3,2), and
@@ -1711,38 +1730,6 @@ mod tests {
         assert_eq!(world.get(1, 2), Metal);
     }
 
-    #[test]
-    fn fling_outward_sets_outward_velocity_and_clears_source() {
-        let mut world = World::new(9, 3);
-        world.paint(2, 1, Sand);
-        world.set_velocity(2, 1, 0, 0);
-
-        assert!(world.fling_outward(2, 1, 1, 0));
-        assert_eq!(world.get(2, 1), Empty, "source cleared");
-        assert_eq!(world.velocity_at(2, 1), (0, 0), "source velocity cleared");
-        // Fling along (1, 0) -> candidate (2, 0) chosen, so impulse = (2, 0).
-        let (new_vx, new_vy) = world.velocity_at(4, 1);
-        assert_eq!(
-            (new_vx, new_vy),
-            (2, 0),
-            "fling sets outward velocity from impulse (2,0)"
-        );
-        assert_eq!(world.get(4, 1), Sand, "sand at displaced location");
-
-        // Existing velocity should be combined with impulse.
-        let mut world2 = World::new(9, 3);
-        world2.paint(2, 1, Water);
-        world2.set_velocity(2, 1, 1, -1);
-        assert!(world2.fling_outward(2, 1, 1, 0));
-        let (vx2, vy2) = world2.velocity_at(4, 1);
-        // Existing (1, -1) + impulse (2, 0) = (3, -1) — within MAX_VELOCITY.
-        assert_eq!(
-            (vx2, vy2),
-            (3, -1),
-            "existing velocity combined with outward impulse"
-        );
-    }
-
     // --- Phase C0: horizontal fractional state tests ---
 
     #[test]
@@ -1808,25 +1795,6 @@ mod tests {
             (1, 2),
             "vy_frac/y_frac carried through translation"
         );
-    }
-
-    #[test]
-    fn fling_outward_carries_horizontal_fractional_state() {
-        let mut world = World::new(9, 3);
-        world.paint(2, 1, Water);
-        world.set_velocity(2, 1, 1, 0);
-        let source = world.idx(2, 1);
-        world.vx_frac[source] = 2;
-        world.x_frac[source] = 1;
-
-        assert!(world.fling_outward(2, 1, 1, 0));
-        assert_eq!(world.get(2, 1), Empty);
-        let target = world.idx(4, 1);
-        assert_eq!(world.get(4, 1), Water);
-        // Impulse (2,0) combines with existing vx=1 => vx=3; vx_frac preserved.
-        assert_eq!(world.vx[target], 3);
-        assert_eq!(world.vx_frac[target], 2, "vx_frac carried by fling");
-        assert_eq!(world.x_frac[target], 1, "x_frac carried by fling");
     }
 
     #[test]

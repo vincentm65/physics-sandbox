@@ -290,15 +290,27 @@ impl Material {
         }
     }
 
-    /// Whether an explosion can destroy this cell.
-    pub fn blast_resistant(self) -> bool {
-        matches!(self, Metal | Concrete)
+    /// Hit points before a blast breaks this solid. `None` means the material is
+    /// not damage-tracked (fluids, powders, and soft cells use other rules).
+    pub fn blast_hp(self) -> Option<u8> {
+        match self {
+            Glass => Some(8),
+            Wood | Plant | Ice => Some(12),
+            Stone => Some(16),
+            Concrete => Some(40),
+            Metal => Some(56),
+            _ => None,
+        }
     }
 
-    /// Blast hits on glass shatter into shards rather than fire/smoke.
-    pub fn blast_shatter_product(self) -> Option<Material> {
+    /// Debris left when accumulated blast damage exceeds [`blast_hp`].
+    pub fn blast_break_product(self) -> Option<Material> {
         match self {
             Glass => Some(BrokenGlass),
+            Stone | Concrete => Some(Sand),
+            Wood | Plant => Some(Ash),
+            Ice => Some(Water),
+            Metal => Some(Empty),
             _ => None,
         }
     }
@@ -364,7 +376,7 @@ impl Material {
         match self {
             Empty => Color::Rgb(8, 10, 16),
             Stone => Color::Rgb(rs(95, 30), rs(95, 30), rs(105, 30)),
-            Wood => Color::Rgb(rs(108, 26), rs(66, 18), rs(34, 12)),
+            Wood => Color::Rgb(128, 80, 45),
             Sand => Color::Rgb(rs(206, 40), rs(184, 40), rs(96, 26)),
             Water => Color::Rgb(rs(38, 18), rs(104, 30), rs(226, 24)),
             Oil => Color::Rgb(rs(48, 16), rs(36, 12), rs(22, 10)),
@@ -391,7 +403,8 @@ impl Material {
                 Color::Rgb(g, g, g.wrapping_add(6))
             }
             Salt => Color::Rgb(rs(235, 12), rs(230, 12), rs(220, 12)),
-            Ice => Color::Rgb(rs(198, 16), rs(220, 14), rs(248, 12)),
+            // A narrow shared shift keeps every crystal in the same cool-blue family.
+            Ice => Color::Rgb(rs(200, 10), rs(222, 10), rs(246, 10)),
             Gunpowder => Color::Rgb(rs(42, 12), rs(40, 12), rs(38, 12)),
             Plant => Color::Rgb(rs(30, 18), rs(148, 30), rs(30, 18)),
             Mercury => Color::Rgb(rs(168, 18), rs(172, 18), rs(180, 18)),
@@ -441,6 +454,24 @@ impl Material {
                     _ => Color::Rgb(glow.saturating_mul(3) / 4, glow / 2, glow),
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Material::{Ice, Wood};
+    use ratatui::style::Color;
+
+    #[test]
+    fn wood_is_brown_and_ice_variations_stay_in_their_color_family() {
+        for seed in 0..=u8::MAX {
+            assert_eq!(Wood.color(seed, 0, 0), Color::Rgb(128, 80, 45));
+
+            assert!(matches!(
+                Ice.color(seed, 0, 0),
+                Color::Rgb(200..=209, 222..=231, 246..=255)
+            ));
         }
     }
 }

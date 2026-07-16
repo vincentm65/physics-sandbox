@@ -67,7 +67,7 @@ fn main() -> io::Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let size = terminal.size()?;
-    let usable = (size.height as usize).saturating_sub(1);
+    let usable = (size.height as usize).saturating_sub(ui::MAX_STATUS_ROWS as usize);
     let mut world = World::new(size.width as usize, usable.saturating_mul(2));
     world.load_scene(app.scene);
 
@@ -109,7 +109,7 @@ fn run_map_command(args: &[String]) -> Option<io::Result<()>> {
 fn handle_event(ev: Event, world: &mut World, app: &mut App) -> bool {
     match ev {
         Event::Resize(w, h) => {
-            let usable = (h as usize).saturating_sub(1);
+            let usable = (h as usize).saturating_sub(ui::MAX_STATUS_ROWS as usize);
             world.resize(w as usize, usable.saturating_mul(2));
             true
         }

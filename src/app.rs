@@ -439,6 +439,8 @@ pub struct App {
     pub picker_open: bool,
     /// Highlighted row in the picker (index into `Material::ALL`).
     pub picker_cursor: usize,
+    /// Incremental type-ahead filter for the material picker.
+    pub picker_query: String,
     /// Tool picker overlay state.
     pub tool_picker_open: bool,
     pub tool_picker_cursor: usize,
@@ -502,6 +504,7 @@ impl Default for App {
             drawing: false,
             picker_open: false,
             picker_cursor: 0,
+            picker_query: String::new(),
             tool_picker_open: false,
             tool_picker_cursor: 0,
             scene: Scene::House,
@@ -674,6 +677,7 @@ impl App {
             }
             if self.picker_open {
                 self.picker_open = false;
+                self.picker_query.clear();
                 return true;
             }
             if self.scene_menu.open {
@@ -852,29 +856,73 @@ impl App {
     fn handle_picker_key(&mut self, k: &KeyEvent) -> bool {
         let n = Material::ALL.len();
         match k.code {
-            KeyCode::Tab | KeyCode::Enter | KeyCode::Char('m') | KeyCode::Char(' ') => {
+            KeyCode::Tab | KeyCode::Enter | KeyCode::Char(' ') => {
                 self.selected = Material::ALL[self.picker_cursor];
                 self.picker_open = false;
+                self.picker_query.clear();
             }
-            KeyCode::Esc => self.picker_open = false,
-            KeyCode::Up | KeyCode::Char('w') | KeyCode::Char('k') => {
+            KeyCode::Esc => {
+                self.picker_open = false;
+                self.picker_query.clear();
+            }
+            KeyCode::Up => {
                 self.picker_cursor = (self.picker_cursor + n - 1) % n;
+                self.picker_query.clear();
             }
-            KeyCode::Down | KeyCode::Char('s') | KeyCode::Char('j') => {
+            KeyCode::Down => {
                 self.picker_cursor = (self.picker_cursor + 1) % n;
+                self.picker_query.clear();
             }
-            KeyCode::Home => self.picker_cursor = 0,
-            KeyCode::End => self.picker_cursor = n - 1,
-            // number/letter shortcuts select straight from the palette and close
-            KeyCode::Char(c) => {
-                if let Some((_, m)) = Material::PALETTE.iter().find(|(k, _)| *k == c) {
-                    self.selected = *m;
-                    self.picker_open = false;
+            KeyCode::Home => {
+                self.picker_cursor = 0;
+                self.picker_query.clear();
+            }
+            KeyCode::End => {
+                self.picker_cursor = n - 1;
+                self.picker_query.clear();
+            }
+            KeyCode::Backspace => {
+                self.picker_query.pop();
+                if !self.picker_query.is_empty() {
+                    self.apply_picker_query();
                 }
+            }
+            // Alphanumerics (and spaces) accumulate as a type-ahead query and
+            // jump the cursor to the first matching material name. Digits are
+            // part of the query so names like "C4"/"TNT" work; palette digit
+            // shortcuts still work outside the picker.
+            KeyCode::Char(c) if c.is_ascii_alphanumeric() || c == ' ' => {
+                self.picker_query.push(c.to_ascii_lowercase());
+                self.apply_picker_query();
             }
             _ => {}
         }
         true
+    }
+
+    /// Move `picker_cursor` to the first material whose name starts with the
+    /// current type-ahead query (case-insensitive; non-alphanumerics ignored).
+    fn apply_picker_query(&mut self) {
+        let query: String = self
+            .picker_query
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .map(|c| c.to_ascii_lowercase())
+            .collect();
+        if query.is_empty() {
+            return;
+        }
+        if let Some(idx) = Material::ALL.iter().position(|m| {
+            let name: String = m
+                .name()
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric())
+                .map(|c| c.to_ascii_lowercase())
+                .collect();
+            name.starts_with(&query)
+        }) {
+            self.picker_cursor = idx;
+        }
     }
 
     fn handle_tool_picker_key(&mut self, k: &KeyEvent) -> bool {
@@ -1018,6 +1066,7 @@ impl App {
 
     fn open_picker(&mut self) {
         self.picker_open = true;
+        self.picker_query.clear();
         if let Some(idx) = Material::ALL.iter().position(|&m| m == self.selected) {
             self.picker_cursor = idx;
         }
@@ -1534,7 +1583,10 @@ impl App {
 
     /// Click inside the popup selects that material; click outside closes it.
     fn click_picker(&mut self, col: u16, row: u16, world: &World) {
-        let area = ui::picker_rect(world.width as u16, (world.height as u16) / 2 + 1);
+        let area = ui::picker_rect(
+            world.width as u16,
+            (world.height as u16) / 2 + ui::MAX_STATUS_ROWS,
+        );
         if col > area.x
             && col < area.x + area.width.saturating_sub(1)
             && row > area.y
@@ -1547,9 +1599,11 @@ impl App {
                 self.picker_cursor = r;
                 self.selected = Material::ALL[r];
                 self.picker_open = false;
+                self.picker_query.clear();
             }
         } else {
             self.picker_open = false;
+            self.picker_query.clear();
         }
     }
 
@@ -1558,7 +1612,10 @@ impl App {
         if self.scene_menu.saving {
             return;
         }
-        let popup = ui::scene_menu_rect(world.width as u16, (world.height as u16) / 2 + 1);
+        let popup = ui::scene_menu_rect(
+            world.width as u16,
+            (world.height as u16) / 2 + ui::MAX_STATUS_ROWS,
+        );
 
         if col >= popup.x
             && col < popup.x + popup.width
@@ -1703,6 +1760,55 @@ mod tests {
     }
 
     #[test]
+    fn picker_typeahead_jumps_to_matching_material() {
+        let mut app = App {
+            picker_open: true,
+            picker_cursor: 0,
+            ..App::default()
+        };
+        let mut world = World::new(4, 4);
+
+        let type_char = |app: &mut App, world: &mut World, c: char| {
+            app.handle(
+                &Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)),
+                world,
+            );
+        };
+
+        type_char(&mut app, &mut world, 's');
+        type_char(&mut app, &mut world, 'a');
+        assert_eq!(Material::ALL[app.picker_cursor], Material::Sand);
+        assert_eq!(app.picker_query, "sa");
+        assert!(app.picker_open);
+
+        type_char(&mut app, &mut world, 'l');
+        // "sal" matches Salt (Sand no longer matches the longer prefix).
+        assert_eq!(Material::ALL[app.picker_cursor], Material::Salt);
+
+        app.picker_query.clear();
+        type_char(&mut app, &mut world, 'g');
+        type_char(&mut app, &mut world, 'l');
+        type_char(&mut app, &mut world, 'a');
+        assert_eq!(Material::ALL[app.picker_cursor], Material::Glass);
+
+        app.picker_query.clear();
+        type_char(&mut app, &mut world, 'c');
+        type_char(&mut app, &mut world, '4');
+        assert_eq!(Material::ALL[app.picker_cursor], Material::C4);
+        assert_eq!(app.picker_query, "c4");
+        assert!(app.picker_open);
+
+        // Enter still confirms the selection.
+        app.handle(
+            &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &mut world,
+        );
+        assert!(!app.picker_open);
+        assert_eq!(app.selected, Material::C4);
+        assert!(app.picker_query.is_empty());
+    }
+
+    #[test]
     fn confirmation_blocks_mouse_painting() {
         let mut app = App {
             confirm: Confirm::Clear,
@@ -1736,7 +1842,10 @@ mod tests {
         app.scene_menu.scenes = vec!["first".into(), "second".into()];
         app.scene_menu.cursor = 1;
         let world = World::new(10, 10);
-        let popup = ui::scene_menu_rect(world.width as u16, (world.height as u16) / 2 + 1);
+        let popup = ui::scene_menu_rect(
+            world.width as u16,
+            (world.height as u16) / 2 + ui::MAX_STATUS_ROWS,
+        );
 
         app.click_scene_menu(popup.x + 1, popup.y, &world);
 

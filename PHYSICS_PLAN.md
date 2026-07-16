@@ -3,7 +3,7 @@
 **Build order: B → C → A.** Velocity is the shared foundation; atmosphere depends
 on movement; explosions depend on both.
 
-## Phase B — Velocity and Movement
+## Phase B — Velocity and Movement [Complete]
 
 Persistent bounded velocity drives movable materials without tunneling. Vertical
 velocity and displacement use quarter-cell fixed point so gravity and buoyancy
@@ -17,24 +17,24 @@ accelerate gradually.
 - Scene, undo, resize, structural movement, and explosion impulses preserve
   velocity state.
 
-**Status:** complete. Legacy flow and spreading remain only as low-speed fallback
-behavior until atmospheric forces can replace them safely.
+**Status:** complete. Low-speed liquid leveling is hydrostatic/velocity-driven;
+multi-cell flow teleports have been removed.
 
-## Phase C — Full-Resolution Atmosphere
+## Phase C — Full-Resolution Atmosphere [Complete]
 
 Atmosphere uses arrays aligned one-to-one with material cells. This preserves
 single-cell walls, holes, leaks, vents, and containers without coarse-grid
 connectivity reconstruction. Empty cells and visible gases are air-permeable;
 solids and liquids displace air.
 
-### C0 — Symmetric fixed-point movement
+### C0 — Symmetric fixed-point movement [Complete]
 
 - Add fractional horizontal velocity and displacement (`vx_frac`, `x_frac`).
 - Apply pressure as small impulses on either axis.
 - Preserve both axes through movement, collisions, saves, undo, resize,
   structural translation, and explosion flings.
 
-### C1 — Conserved air and pressure
+### C1 — Conserved air and pressure [Complete]
 
 - Store fixed-point air mass per material cell; derive pressure from mass and
   local temperature.
@@ -43,17 +43,19 @@ solids and liquids displace air.
 - Process active chunks and reactivate neighboring chunks when flow crosses a
   boundary; do not scan an equilibrium world unnecessarily.
 
-### C2 — Oxygen and combustion products
+### C2 — Oxygen and combustion products [Complete]
 
 - Store oxygen and exhaust as conserved portions of each cell's gas mixture.
-- Fire consumes local oxygen, produces hot exhaust, and extinguishes below a
-  minimum oxygen concentration.
+- Fire consumes local oxygen using an effective 2.5D reserve and produces hot
+  exhaust.
+- Low oxygen weakens heat and spread while increasing smoke; only sustained
+  critical oxygen starvation extinguishes fire.
 - Openings replenish oxygen through the same one-cell transport paths used by
   pressure.
 - Keep visible smoke as a material initially; airflow transports it while the
   atmospheric fields represent invisible gas composition.
 
-### C3 — Combustible gas
+### C3 — Combustible gas [Complete]
 
 - Store fuel vapor as another transported gas component.
 - Hot oil and napalm emit vapor into adjacent open cells.
@@ -62,7 +64,7 @@ solids and liquids displace air.
 - Keep the species list fixed and compact; add new gases only for demonstrated
   gameplay needs.
 
-### C4 — Coupling, controls, and diagnostics
+### C4 — Coupling, controls, and diagnostics [Complete]
 
 - Pressure gradients apply fixed-point impulses to fire, smoke, steam, loose
   powders, liquids, sparks, and movable debris according to resistance.
@@ -78,7 +80,11 @@ sealed fires consume oxygen and extinguish, ventilated fires continue burning,
 fuel vapor leaks and ignites, atmosphere can be toggled or inspected, and the
 million-cell equilibrium selftest remains practical.
 
-## Phase A — Explosions and Structural Impacts
+**Status:** complete. One-cell venting, draft-driven smoke, staged combustion,
+ventilation, fuel-vapor ignition, controls, persistence, and diagnostics are
+implemented and covered by tests.
+
+## Phase A — Explosions and Structural Impacts [Complete]
 
 Build explosions from velocity and atmospheric pressure instead of directly
 relocating cells.
@@ -92,6 +98,12 @@ relocating cells.
 
 **Done when:** blasts propagate through exact openings, throw debris, damage
 nearby structures, and behave differently in sealed versus open spaces.
+
+**Status:** complete. Instantaneous blast profiles (gunpowder/TNT/C4) apply
+LOS-aware damage, heat, and outward velocity impulses; atmosphere receives a
+matching overpressure injection. Structural solids accumulate damage against
+per-material HP and break into debris; fluids keep their cells and ride
+velocity rather than being relocated by `fling_outward`.
 
 ## Shared Rules
 

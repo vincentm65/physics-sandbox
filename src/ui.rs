@@ -10,13 +10,23 @@ use crate::app::{App, AtmosOverlay, Confirm, EditorTool};
 use crate::material::Material;
 use crate::world::World;
 
+/// Terminal rows reserved for the status bar. World height is sized against this
+/// fixed reserve so ground cells stay visible even when the bar wraps.
+pub const MAX_STATUS_ROWS: u16 = 3;
+
 /// Draw the whole frame: filled-cell material grid + a status line + optional
 /// material-picker overlay.
 pub fn draw(frame: &mut Frame, world: &World, app: &App) {
     let area = frame.area();
-    let sr = status_rows(app, area.width);
-    let grid_area = Rect::new(area.x, area.y, area.width, area.height.saturating_sub(sr));
+    // Always reserve the max status height so the sim ground matches the canvas.
+    let grid_area = Rect::new(
+        area.x,
+        area.y,
+        area.width,
+        area.height.saturating_sub(MAX_STATUS_ROWS),
+    );
     draw_grid(frame, world, app, &grid_area);
+    let sr = status_rows(app, area.width);
     draw_status(frame, app, &area, sr);
     if app.brush_options_open {
         draw_brush_options(frame, &area, app);
@@ -221,12 +231,12 @@ fn status_text(app: &App) -> String {
     )
 }
 
-/// How many terminal rows the status bar needs (capped at 3).
+/// How many terminal rows the status bar needs (capped at `MAX_STATUS_ROWS`).
 pub(crate) fn status_rows(app: &App, terminal_width: u16) -> u16 {
     let w = terminal_width.max(1) as usize;
     let chars = status_text(app).chars().count();
     let needed = chars.div_ceil(w);
-    (needed as u16).clamp(1, 3)
+    (needed as u16).clamp(1, MAX_STATUS_ROWS)
 }
 
 fn draw_status(frame: &mut Frame, app: &App, area: &Rect, status_rows: u16) {
@@ -236,18 +246,20 @@ fn draw_status(frame: &mut Frame, app: &App, area: &Rect, status_rows: u16) {
     let accent = Color::Rgb(255, 220, 120);
     let width = area.width as usize;
 
-    let base_y = area.y + area.height - status_rows;
-
-    // fill status rows with background
-    for row in 0..status_rows {
-        let sy = base_y + row;
+    // Always clear the full reserved status block so wrapped/unwrapped status
+    // never leaves stale grid cells visible above the taskbar.
+    let reserve_top = area.y + area.height.saturating_sub(MAX_STATUS_ROWS);
+    for y in reserve_top..area.y + area.height {
         for x in 0..area.width {
-            if let Some(cell) = buf.cell_mut((area.x + x, sy)) {
+            if let Some(cell) = buf.cell_mut((area.x + x, y)) {
                 cell.set_char(' ');
                 cell.set_bg(bg);
             }
         }
     }
+
+    // Pin status text to the bottom of the reserved block.
+    let base_y = area.y + area.height - status_rows;
 
     // Status message takes priority if active.
     if let Some(msg) = &app.status_msg {
@@ -482,9 +494,17 @@ fn draw_picker(frame: &mut Frame, area: &Rect, app: &App) {
     // wipe anything behind, then draw the framed panel — do this before the
     // mutable buffer borrow below.
     frame.render_widget(Clear, popup);
+    let title = if app.picker_query.is_empty() {
+        " Materials — type to find, Enter pick, Esc close ".to_string()
+    } else {
+        format!(
+            " Materials — \"{}\" · Enter pick, Esc close ",
+            app.picker_query
+        )
+    };
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Materials — Tab/Enter to pick, Esc to close ")
+        .title(title)
         .style(
             Style::default()
                 .fg(Color::Rgb(210, 214, 224))

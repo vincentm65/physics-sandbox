@@ -19,7 +19,10 @@ impl World {
                     for x in x0..x1 {
                         let i = self.idx(x, y);
                         let m = self.grid[i];
-                        if let Some(src) = m.heat_source_temp() {
+                        if let Some(mut src) = m.heat_source_temp() {
+                            if m == Fire {
+                                src = self.fire_heat(i);
+                            }
                             self.temp_next[i] = src;
                             self.activate_next(x, y);
                             continue;
@@ -54,7 +57,10 @@ impl World {
         for n in self.n8(x, y).into_iter().flatten() {
             let ni = self.idx(n.0, n.1);
             let m = self.grid[ni];
-            if let Some(src) = m.heat_source_temp() {
+            if let Some(mut src) = m.heat_source_temp() {
+                if m == Fire {
+                    src = self.fire_heat(ni);
+                }
                 if src > t {
                     t = src;
                 } else if src < t {

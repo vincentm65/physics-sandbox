@@ -1,8 +1,12 @@
 use super::*;
 
 impl World {
-    pub(super) fn explode(&mut self, x: usize, y: usize, radius: i32) {
+    /// Detonate with a material-specific blast profile.
+    pub(super) fn explode(&mut self, x: usize, y: usize, profile: BlastProfile) {
+        let radius = profile.radius;
         let r2 = radius * radius;
+
+        // Inside-out so hard blockers stop the wave before outer cells are hit.
         let mut cells: Vec<(i32, i32, i32, usize, usize)> = Vec::new();
         for dy in -radius..=radius {
             for dx in -radius..=radius {
@@ -16,127 +20,225 @@ impl World {
                 cells.push((dist2, dx, dy, tx, ty));
             }
         }
-        // Outside-in so flung grains find space cleared by outer destruction.
-        cells.sort_unstable_by_key(|cell| std::cmp::Reverse(cell.0));
+        cells.sort_unstable_by_key(|cell| cell.0);
 
         for &(dist2, dx, dy, tx, ty) in &cells {
+            // Epicentre always clears; every other cell needs a free LOS path.
+            if dist2 > 0 && !self.blast_has_line_of_sight(x, y, tx, ty) {
+                continue;
+            }
+
+            // Linear falloff with a floor so cells near the radius edge still hit.
+            let strength = if dist2 == 0 {
+                1000
+            } else {
+                let linear = (r2 - dist2) * 1000 / r2.max(1);
+                linear.max(350)
+            };
+            let damage = ((profile.damage as i32 * strength) / 1000) as u8;
+            let impulse = ((profile.impulse as i32 * strength) / 1000).clamp(0, 16) as i8;
+            let heat = ((profile.heat as i32 * strength) / 1000) as i16;
+
             let i = self.idx(tx, ty);
             let material = self.grid[i];
-            if material.blast_resistant() {
-                continue;
+
+            // Heat soaks into whatever remains, including resistant walls.
+            if heat > 0 {
+                self.temp[i] = (self.temp[i] as i32 + heat as i32).clamp(-200, 1_500) as i16;
             }
-            if let Some(shard) = material.blast_shatter_product() {
-                self.put(i, shard, 0);
+
+            if material.is_empty() || material.is_gas() {
+                // Soft fill at the core so blasts leave a brief fireball.
+                if dist2 == 0 || (strength > 550 && self.roll(tx, ty, 0x92) < 350) {
+                    self.put(i, Fire, rand_range(FIRE_LIFE_MIN / 2, FIRE_LIFE_MAX / 2));
+                } else if strength > 300 && self.roll(tx, ty, 0x93) < 250 {
+                    self.put(
+                        i,
+                        Smoke,
+                        rand_range(SMOKE_LIFE_MIN / 3, SMOKE_LIFE_MAX / 3),
+                    );
+                }
+                if impulse > 0 {
+                    self.apply_blast_impulse(i, dx, dy, impulse);
+                }
+                self.activate_next(tx, ty);
                 continue;
             }
 
-            // Fling loose powders/fluids outward before deciding destruction.
-            if material.is_fluid() && dist2 > 0 && self.fling_outward(tx, ty, dx, dy) {
+            // Structural solids accumulate damage and only break past HP.
+            if let Some(hp) = material.blast_hp() {
+                if self.apply_blast_damage(i, material, damage, hp) {
+                    // Debris inherits an outward kick so broken walls collapse away.
+                    if impulse > 0 && self.grid[i].is_fluid() {
+                        self.apply_blast_impulse(i, dx, dy, impulse);
+                    }
+                }
+                self.activate_next(tx, ty);
                 continue;
             }
 
-            let roll = self.roll(tx, ty, 0x92);
-            if roll < 550 {
-                self.put(i, Fire, rand_range(FIRE_LIFE_MIN, FIRE_LIFE_MAX));
-            } else if roll < 800 {
-                self.put(i, Smoke, rand_range(SMOKE_LIFE_MIN / 2, SMOKE_LIFE_MAX / 2));
-            } else if roll < 920
-                && matches!(
-                    material,
-                    Stone | Wood | Concrete | Plant | Ice | Glass | Coal | Ash
-                )
-            {
-                // Outer rubble instead of pure vaporization.
-                self.put(i, Sand, 0);
-            } else {
-                self.put(i, Empty, 0);
+            // Loose powders/liquids and soft cells: destroy only near the core so the
+            // blast throws debris instead of deleting it. Impulse is applied only
+            // to survivors so put() cannot wipe the kick.
+            if material.is_fluid() {
+                if strength > 700 {
+                    let roll = self.roll(tx, ty, 0x94);
+                    if roll < 400 {
+                        self.put(i, Fire, rand_range(FIRE_LIFE_MIN / 2, FIRE_LIFE_MAX / 2));
+                        self.activate_next(tx, ty);
+                        continue;
+                    } else if roll < 700 {
+                        self.put(
+                            i,
+                            Smoke,
+                            rand_range(SMOKE_LIFE_MIN / 3, SMOKE_LIFE_MAX / 3),
+                        );
+                        self.activate_next(tx, ty);
+                        continue;
+                    } else if strength > 850 {
+                        self.put(i, Empty, 0);
+                        self.activate_next(tx, ty);
+                        continue;
+                    }
+                }
+                if impulse > 0 {
+                    self.apply_blast_impulse(i, dx, dy, impulse);
+                }
+                self.activate_next(tx, ty);
+                continue;
             }
+
+            // Remaining non-structural solids (TNT/C4/fuse/plant tools, etc.).
+            if damage >= 8 {
+                let roll = self.roll(tx, ty, 0x95);
+                if roll < 500 {
+                    self.put(i, Fire, rand_range(FIRE_LIFE_MIN / 2, FIRE_LIFE_MAX / 2));
+                } else if roll < 800 {
+                    self.put(
+                        i,
+                        Smoke,
+                        rand_range(SMOKE_LIFE_MIN / 3, SMOKE_LIFE_MAX / 3),
+                    );
+                } else {
+                    self.put(i, Empty, 0);
+                }
+            }
+            self.activate_next(tx, ty);
         }
 
-        // Atmosphere overpressure / heat from explosion.
+        // Atmosphere overpressure / heat from explosion (LOS-aware).
         if self.atmos_enabled {
-            self.explode_atmos_effect(x, y, radius);
+            self.explode_atmos_effect(x, y, profile);
         }
     }
 
-    /// Push the cell at `(x, y)` further from the blast origin along `(dx, dy)`.
-    /// Combines existing velocity with the outward displacement as an impulse,
-    /// clamped through MAX_VELOCITY. Returns true when the grain left its original cell.
-    pub(super) fn fling_outward(&mut self, x: usize, y: usize, dx: i32, dy: i32) -> bool {
+    /// Supercover line of sight: blast energy is blocked by hard solids.
+    /// The destination cell is excluded so a wall can still take the hit that
+    /// stops further propagation beyond it.
+    pub(super) fn blast_has_line_of_sight(
+        &self,
+        x0: usize,
+        y0: usize,
+        x1: usize,
+        y1: usize,
+    ) -> bool {
+        let mut x = x0 as i32;
+        let mut y = y0 as i32;
+        let x1 = x1 as i32;
+        let y1 = y1 as i32;
+        let dx = (x1 - x).abs();
+        let dy = (y1 - y).abs();
+        let sx = if x < x1 { 1 } else { -1 };
+        let sy = if y < y1 { 1 } else { -1 };
+        let mut err = dx - dy;
+
+        loop {
+            if x == x1 && y == y1 {
+                return true;
+            }
+            // Skip the origin; check every crossed cell before the target.
+            if !(x == x0 as i32 && y == y0 as i32) {
+                let i = self.idx(x as usize, y as usize);
+                if self.blast_blocks_wave(self.grid[i]) {
+                    return false;
+                }
+            }
+
+            let e2 = err * 2;
+            let mut stepped = false;
+            if e2 > -dy {
+                err -= dy;
+                x += sx;
+                stepped = true;
+            }
+            if e2 < dx {
+                // When both axes advance on the same iteration the diagonal
+                // corner cell is also checked by the next loop body.
+                err += dx;
+                y += sy;
+                stepped = true;
+            }
+            if !stepped {
+                return false;
+            }
+        }
+    }
+
+    /// Hard solids stop blast propagation; broken debris and fluids do not.
+    fn blast_blocks_wave(&self, material: Material) -> bool {
+        material.blast_hp().is_some()
+    }
+
+    /// Add accumulated blast damage. Breaks the cell into its debris product
+    /// once damage meets the material HP. Returns true when the cell broke.
+    pub(super) fn apply_blast_damage(
+        &mut self,
+        i: usize,
+        material: Material,
+        damage: u8,
+        hp: u8,
+    ) -> bool {
+        if damage == 0 {
+            return false;
+        }
+        // life is reused as soak/ignition counters for many materials; for
+        // structural solids it now also tracks accumulated blast damage.
+        let next = self.life[i].saturating_add(damage as u16);
+        if next < hp as u16 {
+            self.life[i] = next;
+            self.activate_idx(i);
+            return false;
+        }
+
+        let product = material.blast_break_product().unwrap_or(Empty);
+        let life = rand_life(product);
+        self.put(i, product, life);
+        true
+    }
+
+    /// Apply an outward fixed-point impulse along `(dx, dy)` without relocating
+    /// the cell. Velocity-driven movement throws the debris on later ticks.
+    pub(super) fn apply_blast_impulse(&mut self, i: usize, dx: i32, dy: i32, impulse: i8) {
+        if impulse == 0 || (dx == 0 && dy == 0) {
+            return;
+        }
+        // Normalize direction to unit steps so diagonals do not get double force.
         let sx = dx.signum();
         let sy = dy.signum();
-        let i = self.idx(x, y);
-        let material = self.grid[i];
-        let life = self.life[i];
-        let seed = self.seed[i];
-        let temp = self.temp[i];
-        let vx = self.vx[i];
-        let vy = self.vy[i];
-        let vy_frac = self.vy_frac[i];
-        let y_frac = self.y_frac[i];
-        let vx_frac = self.vx_frac[i];
-        let x_frac = self.x_frac[i];
-
-        // Prefer longer throws, then cardinal fallbacks when the diagonal is blocked.
-        let candidates = [
-            (sx * 2, sy * 2),
-            (sx, sy),
-            (sx * 2, 0),
-            (0, sy * 2),
-            (sx, 0),
-            (0, sy),
-        ];
-        for idx in 0..candidates.len() {
-            let (px, py) = candidates[idx];
-            if px == 0 && py == 0 {
-                continue;
-            }
-            if candidates[..idx].contains(&(px, py)) {
-                continue;
-            }
-            let Some((lx, ly)) = self.adj(x, y, px, py) else {
-                continue;
-            };
-            let li = self.idx(lx, ly);
-            if !(self.grid[li].is_empty() || self.grid[li].is_gas()) {
-                continue;
-            }
-            self.grid[i] = Empty;
-            self.life[i] = 0;
-            self.vx[i] = 0;
-            self.vy[i] = 0;
-            self.vx_frac[i] = 0;
-            self.x_frac[i] = 0;
-            self.vy_frac[i] = 0;
-            self.y_frac[i] = 0;
-            self.temp[i] = AMBIENT_TEMP;
-            self.moved_tick[i] = self.tick;
-            self.activate_idx(i);
-
-            // Combine existing velocity with outward impulse in fixed-point units.
-            let new_vx = (vx as i32 + px).clamp(-(MAX_VELOCITY as i32), MAX_VELOCITY as i32) as i8;
-            let max_fixed = MAX_VELOCITY as i16 * VELOCITY_SCALE as i16;
-            let fixed_vy = vy as i16 * VELOCITY_SCALE as i16 + vy_frac as i16;
-            let new_fixed_vy =
-                (fixed_vy + py as i16 * VELOCITY_SCALE as i16).clamp(-max_fixed, max_fixed);
-            let new_vy = (new_fixed_vy / VELOCITY_SCALE as i16) as i8;
-            let new_vy_frac = (new_fixed_vy % VELOCITY_SCALE as i16) as i8;
-
-            self.grid[li] = material;
-            self.life[li] = life;
-            self.seed[li] = seed;
-            self.temp[li] = temp;
-            self.vx[li] = new_vx;
-            self.vy[li] = new_vy;
-            self.vx_frac[li] = vx_frac;
-            self.x_frac[li] = x_frac;
-            self.vy_frac[li] = new_vy_frac;
-            self.y_frac[li] = y_frac;
-            self.moved_tick[li] = self.tick;
-            self.activate_idx(li);
-            return true;
+        let scale = if sx != 0 && sy != 0 {
+            // Approximate 1/sqrt(2) so diagonal kicks match cardinal strength.
+            (impulse as i32 * 3) / 4
+        } else {
+            impulse as i32
+        };
+        let ix = (sx * scale).clamp(-16, 16) as i8;
+        let iy = (sy * scale).clamp(-16, 16) as i8;
+        if ix != 0 {
+            self.apply_horizontal_impulse(i, ix, self.grid[i]);
         }
-        false
+        if iy != 0 {
+            self.apply_vertical_impulse(i, iy, self.grid[i]);
+        }
     }
 
     pub(super) fn step_combustible(&mut self, x: usize, y: usize, effective_temp: i16) -> bool {
@@ -188,7 +290,7 @@ impl World {
 
     pub(super) fn step_tnt(&mut self, x: usize, y: usize) {
         if self.is_heated(x, y) {
-            self.explode(x, y, TNT_BLAST_RADIUS);
+            self.explode(x, y, TNT_BLAST);
         }
     }
 
@@ -238,7 +340,7 @@ impl World {
     pub(super) fn step_c4(&mut self, x: usize, y: usize) {
         self.activate_next(x, y);
         if self.is_heated(x, y) {
-            self.explode(x, y, C4_BLAST_RADIUS);
+            self.explode(x, y, C4_BLAST);
         }
     }
 
@@ -356,9 +458,9 @@ impl World {
         }
         let m = self.grid[i];
 
-        // Gunpowder blast respects blast_resistant materials via explode().
+        // Gunpowder blast respects structural HP / LOS via explode().
         if m == Gunpowder && self.is_heated(x, y) {
-            self.explode(x, y, GUNPOWDER_BLAST_RADIUS);
+            self.explode(x, y, GUNPOWDER_BLAST);
             return;
         }
 
@@ -376,7 +478,7 @@ impl World {
             return;
         }
 
-        // Diagonal avalanche fallback after a downward collision.
+        // Single-cell diagonal resolution after a blocked fall.
         let sink = |other| m.can_sink_into(other);
         let (d1, d2) = self.dirs(x, y, 0x10);
         for d in [d1, d2] {
@@ -392,7 +494,8 @@ impl World {
 
     /// Convert the weight of a liquid column into lateral momentum at an open
     /// boundary. The cells remain incompressible; pressure only acts when the
-    /// column is supported and has somewhere to discharge.
+    /// column is supported and has somewhere to discharge. Shallow surface cells
+    /// still get a unit impulse so pools level without multi-cell teleports.
     fn apply_liquid_pressure(&mut self, x: usize, y: usize, m: Material) {
         let cap = pressure_speed_of(m);
         if cap == 0 {
@@ -403,6 +506,19 @@ impl World {
             .adj(x, y, 0, 1)
             .is_none_or(|(bx, by)| !m.can_sink_into(self.get(bx, by)));
         if !supported {
+            // Free-falling liquid should drop, not keep sliding past an outlet.
+            let i = self.idx(x, y);
+            if self.vx[i] != 0 || self.vx_frac[i] != 0 || self.x_frac[i] != 0 {
+                self.vx[i] = 0;
+                self.vx_frac[i] = 0;
+                self.x_frac[i] = 0;
+                self.activate_idx(i);
+            }
+            return;
+        }
+
+        // Sticky gels cling to solid support instead of discharging sideways.
+        if m.sticky() {
             return;
         }
 
@@ -415,16 +531,23 @@ impl World {
             }
             head += 1;
         }
-        if head < 2 {
-            return;
-        }
 
         let left_open = x > 0 && self.get(x - 1, y) == Empty;
         let right_open = x + 1 < self.width && self.get(x + 1, y) == Empty;
         let dir = match (left_open, right_open) {
             (true, false) => -1,
             (false, true) => 1,
-            (true, true) => self.dirs(x, y, 0x22).0,
+            (true, true) => {
+                // Prefer the side that drops soonest so free surfaces drain
+                // into open basins instead of jittering in place.
+                let left_drop = self.surface_drop_score(x, y, -1);
+                let right_drop = self.surface_drop_score(x, y, 1);
+                match left_drop.cmp(&right_drop) {
+                    std::cmp::Ordering::Greater => -1,
+                    std::cmp::Ordering::Less => 1,
+                    std::cmp::Ordering::Equal => self.dirs(x, y, 0x22).0,
+                }
+            }
             (false, false) => return,
         };
         let speed = (1 + (head.saturating_sub(1) / 3) as i8).min(cap);
@@ -435,6 +558,27 @@ impl World {
             self.x_frac[i] = 0;
             self.activate_idx(i);
         }
+    }
+
+    /// Distance-weighted preference for an open downward step along a free surface.
+    fn surface_drop_score(&self, x: usize, y: usize, dir: i32) -> usize {
+        let mut cx = x;
+        for distance in 1..=4 {
+            let Some((nx, _)) = self.adj(cx, y, dir, 0) else {
+                break;
+            };
+            if self.get(nx, y) != Empty {
+                break;
+            }
+            if self
+                .adj(nx, y, 0, 1)
+                .is_some_and(|(bx, by)| self.get(bx, by) == Empty)
+            {
+                return 5 - distance;
+            }
+            cx = nx;
+        }
+        0
     }
 
     pub(super) fn step_liquid(&mut self, x: usize, y: usize) {
@@ -454,23 +598,42 @@ impl World {
         if matches!(m, Lava | Napalm) && !self.tick.is_multiple_of(2) {
             return;
         }
-        if m.sticky()
-            && let Some((bx, by)) = self.adj(x, y, 0, 1)
-        {
-            let below = self.grid[self.idx(bx, by)];
-            if !below.is_empty() && !below.is_fluid() && !self.chance(x, y, 0x55, 80) {
-                return;
+
+        // Napalm clings to solids: damp lateral sliding and skip hydrostatic
+        // discharge so shallow unit impulses cannot skate it off a ledge.
+        // Rare drips use a single-cell lateral step instead of velocity jets.
+        let clinging = m.sticky()
+            && self.adj(x, y, 0, 1).is_some_and(|(bx, by)| {
+                let below = self.grid[self.idx(bx, by)];
+                !below.is_empty() && !below.is_fluid()
+            });
+        if clinging {
+            if self.vx[i] != 0 || self.vx_frac[i] != 0 || self.x_frac[i] != 0 {
+                self.vx[i] = 0;
+                self.vx_frac[i] = 0;
+                self.x_frac[i] = 0;
+                self.activate_idx(i);
             }
+            if self.chance(x, y, 0x55, 80) {
+                let (d1, d2) = self.dirs(x, y, 0x20);
+                for d in [d1, d2] {
+                    if self.try_step(x, y, d, 0, |t| t == Empty) {
+                        return;
+                    }
+                }
+            }
+            return;
         }
 
         // Apply vertical force and hydrostatic pressure after lifecycle/reaction
-        // checks. Supported columns discharge sideways with speed proportional
-        // to their head; falling liquid remains governed by gravity.
+        // checks. Supported columns and free surfaces discharge sideways with
+        // speed proportional to head; falling liquid remains gravity-driven.
         self.apply_vertical_force(i);
         self.apply_liquid_pressure(x, y, m);
         let has_vertical_step = self.has_vertical_step(i);
 
-        // --- Velocity-driven movement (Phase B) ---
+        // Velocity-driven movement only: lateral leveling is carried by
+        // hydrostatic impulses above, not by multi-cell teleports.
         if self.try_velocity_move(x, y) {
             return;
         }
@@ -481,7 +644,7 @@ impl World {
         let sink = |other| m.can_sink_into(other);
         let rise = |t: Material| t.is_fluid() && m.density() < t.density();
 
-        // Diagonal collision fallback.
+        // Single-cell diagonal resolution after a blocked fall.
         let (d1, d2) = self.dirs(x, y, 0x20);
         for d in [d1, d2] {
             if let Some((tx, ty)) = self.adj(x, y, d, 1) {
@@ -493,68 +656,7 @@ impl World {
             }
         }
         // buoyancy: lighter liquid rises through a denser one
-        if self.try_step(x, y, 0, -1, rise) {
-            return;
-        }
-        // sticky gels barely flow sideways
-        if m.sticky() && !self.chance(x, y, 0x56, 120) {
-            return;
-        }
-        // horizontal flow: travel several cells so a liquid levels out quickly
-        // instead of piling into a thin column.
-        let spread = spread_of(m);
-        let empty = |t: Material| t.is_empty();
-        let (random_first, random_second) = self.dirs(x, y, 0x21);
-        let left_score = self.flow_score(x, y, -1, spread);
-        let right_score = self.flow_score(x, y, 1, spread);
-        let (d1, d2) = match left_score.cmp(&right_score) {
-            std::cmp::Ordering::Greater => (-1, 1),
-            std::cmp::Ordering::Less => (1, -1),
-            std::cmp::Ordering::Equal => (random_first, random_second),
-        };
-        if self.flow(x, y, d1, spread, empty) {
-            return;
-        }
-        let _ = self.flow(x, y, d2, spread, empty);
-    }
-
-    /// Slide the cell at `(x, y)` sideways up to `range` times in `dir`, stopping
-    /// at the first cell `allow` rejects. Returns true if it moved at least once.
-    pub(super) fn flow(
-        &mut self,
-        x: usize,
-        y: usize,
-        dir: i32,
-        range: usize,
-        allow: impl Fn(Material) -> bool,
-    ) -> bool {
-        let material = self.get(x, y);
-        let mut cx = x as i32;
-        for _ in 0..range {
-            if !self.try_step(cx as usize, y, dir, 0, &allow) {
-                break;
-            }
-            cx += dir;
-            if self
-                .adj(cx as usize, y, 0, 1)
-                .is_some_and(|(bx, by)| self.get(bx, by) == Empty)
-            {
-                break;
-            }
-        }
-        if cx == x as i32 {
-            return false;
-        }
-
-        let momentum = flow_momentum_of(material);
-        if momentum > 0 {
-            let i = self.idx(cx as usize, y);
-            self.vx[i] = dir as i8 * momentum;
-            self.vx_frac[i] = 0;
-            self.x_frac[i] = 0;
-            self.activate_idx(i);
-        }
-        true
+        let _ = self.try_step(x, y, 0, -1, rise);
     }
 
     pub(super) fn step_gas(&mut self, x: usize, y: usize) {
@@ -605,7 +707,7 @@ impl World {
             return;
         }
 
-        // Diagonal and horizontal ceiling-spread fallback.
+        // Single-cell residual dispersion under ceilings when buoyancy is blocked.
         let d = m.density();
         let rise = |t: Material| t.is_empty() || (t.is_fluid() && d < t.density());
         let (d1, d2) = self.dirs(x, y, 0x30);
@@ -646,7 +748,7 @@ impl World {
                 return;
             }
         } else {
-            // Legacy fallback: no free neighbour → smother.
+            // Atmosphere-off mode: smother when no free neighbour remains.
             let mut has_air = false;
             for (nx, ny) in self.n8(x, y).into_iter().flatten() {
                 let ni = self.idx(nx, ny);
@@ -685,12 +787,23 @@ impl World {
         }
 
         if extinguished {
-            self.put(i, Steam, rand_range(STEAM_LIFE_MIN, STEAM_LIFE_MAX));
+            // The adjacent water already became steam. Turning the flame into
+            // steam too would create an extra water cell when both condense.
+            self.put(i, Smoke, rand_range(SMOKE_LIFE_MIN / 2, SMOKE_LIFE_MAX / 2));
             return;
         }
 
-        // An occasional wisp of smoke wafts up off the flame.
-        if self.chance(x, y, 0x43, 20)
+        // Oxygen-starved flames make more visible smoke as combustion dirties.
+        let smoke_chance = if self.atmos_enabled {
+            match self.oxygen_percent(i) {
+                percent if percent < CRITICAL_OXYGEN_PERCENT => 160,
+                percent if percent < LOW_OXYGEN_PERCENT => 80,
+                _ => 20,
+            }
+        } else {
+            20
+        };
+        if self.chance(x, y, 0x43, smoke_chance)
             && let Some((ux, uy)) = self.adj(x, y, 0, -1)
         {
             let ui = self.idx(ux, uy);
@@ -800,26 +913,6 @@ impl World {
 mod tests {
     use super::*;
 
-    #[test]
-    fn fling_outward_carries_velocity_and_clears_source() {
-        let mut world = World::new(7, 3);
-        world.paint(2, 1, Water);
-        world.set_velocity(2, 1, -3, 4);
-        let source = world.idx(2, 1);
-        world.vy_frac[source] = -2;
-        world.y_frac[source] = 3;
-
-        assert!(world.fling_outward(2, 1, 1, 0));
-        assert_eq!(world.get(2, 1), Empty);
-        assert_eq!(world.velocity_at(2, 1), (0, 0));
-        assert_eq!((world.vy_frac[source], world.y_frac[source]), (0, 0));
-        assert_eq!(world.get(4, 1), Water);
-        // Horizontal impulse changes vx; fixed vertical velocity remains 3.5.
-        assert_eq!(world.velocity_at(4, 1), (-1, 3));
-        let target = world.idx(4, 1);
-        assert_eq!((world.vy_frac[target], world.y_frac[target]), (2, 3));
-    }
-
     fn pressurized_column(material: Material) -> World {
         let mut world = World::new(12, 10);
         for x in 0..12 {
@@ -830,6 +923,24 @@ mod tests {
             world.paint(2, y, material);
         }
         world
+    }
+
+    #[test]
+    fn extinguishing_fire_does_not_create_extra_water_mass() {
+        let mut world = World::new(4, 3);
+        world.paint(1, 1, Water);
+        world.paint(2, 1, Fire);
+
+        world.step_fire(2, 1);
+
+        let water_mass = world
+            .grid
+            .iter()
+            .filter(|&&material| matches!(material, Water | Steam))
+            .count();
+        assert_eq!(water_mass, 1);
+        assert_eq!(world.get(1, 1), Steam);
+        assert_eq!(world.get(2, 1), Smoke);
     }
 
     #[test]
@@ -863,5 +974,30 @@ mod tests {
 
         world.apply_liquid_pressure(2, 3, Water);
         assert_eq!(world.velocity_at(2, 3), (0, 0));
+    }
+
+    #[test]
+    fn sticky_liquid_clings_instead_of_pressurizing_off_support() {
+        let mut world = World::new(9, 9);
+        for x in 0..9 {
+            world.paint(x, 8, Metal);
+        }
+        for x in 3..6 {
+            world.paint(x, 7, Metal);
+            world.paint(x, 6, Napalm);
+        }
+
+        // Direct pressure must not skate clinging napalm sideways.
+        world.apply_liquid_pressure(3, 6, Napalm);
+        assert_eq!(world.velocity_at(3, 6), (0, 0));
+
+        for _ in 0..40 {
+            world.step();
+        }
+        let still_on_ledge = (3..6).filter(|&x| world.get(x, 6) == Napalm).count();
+        assert!(
+            still_on_ledge > 0,
+            "napalm should remain on the solid ledge"
+        );
     }
 }
