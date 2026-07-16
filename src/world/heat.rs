@@ -37,7 +37,12 @@ impl World {
                         let cond = m.thermal_conductivity() as i32;
                         let cur = self.temp[i] as i32;
                         let mut next = cur + (avg - cur) * cond / 16;
-                        next += (AMBIENT_TEMP as i32 - next) / 48;
+                        let ambient_delta = AMBIENT_TEMP as i32 - next;
+                        next += if ambient_delta.abs() < 48 {
+                            ambient_delta.signum()
+                        } else {
+                            ambient_delta / 48
+                        };
                         self.temp_next[i] = next.clamp(-200, 1_500) as i16;
                         if (self.temp_next[i] - AMBIENT_TEMP).abs() > 5 {
                             self.activate_next(x, y);
@@ -81,5 +86,21 @@ impl World {
             }
         }
         t
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn near_ambient_temperature_converges_instead_of_stalling() {
+        let mut world = World::new(1, 1);
+        world.temp[0] = AMBIENT_TEMP + 1;
+        world.active_chunks.fill(true);
+
+        world.step_heat();
+
+        assert_eq!(world.temp[0], AMBIENT_TEMP);
     }
 }

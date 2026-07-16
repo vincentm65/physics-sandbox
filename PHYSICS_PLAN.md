@@ -37,15 +37,18 @@ solids and liquids displace air.
 ### C1 — Conserved air and pressure [Complete]
 
 - Store fixed-point air mass per material cell; derive pressure from mass and
-  local temperature.
+  local absolute temperature, and carry heat with transported air.
 - Exchange bounded mass through cardinal connections at full resolution.
-- Treat world edges as ambient vents and material edits as topology changes.
+- Treat world edges as ambient reservoirs that independently restore pressure
+  and composition, and material edits as topology changes.
 - Process active chunks and reactivate neighboring chunks when flow crosses a
   boundary; do not scan an equilibrium world unnecessarily.
 
 ### C2 — Oxygen and combustion products [Complete]
 
 - Store oxygen and exhaust as conserved portions of each cell's gas mixture.
+- Apply temperature-aware molecular-weight stratification after vertical mixing,
+  so cool heavy gases settle while sufficiently hot gases rise.
 - Fire consumes local oxygen using an effective 2.5D reserve and produces hot
   exhaust.
 - Low oxygen weakens heat and spread while increasing smoke; only sustained
@@ -71,7 +74,8 @@ solids and liquids displace air.
 - `Air Physics` can be toggled without deleting its state; `Reset Atmosphere`
   explicitly restores ambient air.
 - Independent overlays show pressure, oxygen, fuel vapor, exhaust, temperature,
-  and airflow without changing simulation.
+  and airflow without changing simulation; scalar overlays include numeric color
+  legends.
 - Scene files and undo snapshots preserve atmosphere and remain backward
   compatible by initializing missing fields from material permeability.
 

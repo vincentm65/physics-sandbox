@@ -826,9 +826,24 @@ impl World {
                 >= VELOCITY_SCALE as u16
     }
 
+    /// Atmosphere-aware lift for visible gas materials. Buoyancy vanishes in a
+    /// near-vacuum, strengthens in dense air, and increases with gas temperature.
+    fn visible_gas_buoyancy(&self, i: usize) -> i8 {
+        if !self.atmos_enabled {
+            return -GRAVITY_PER_TICK;
+        }
+        let air = self.air_mass[i].max(0) as i32;
+        if air < AMBIENT_AIR_MASS as i32 / 8 {
+            return 0;
+        }
+        let density_lift = (air + AMBIENT_AIR_MASS as i32 - 1) / AMBIENT_AIR_MASS as i32;
+        let thermal_lift = (self.temp[i] as i32 - AMBIENT_TEMP as i32).max(0) / 300;
+        -(density_lift + thermal_lift).clamp(1, 4) as i8
+    }
+
     /// Apply the appropriate vertical force to the cell at `i` based on its
     /// material classification. Gravity accelerates powders, liquids, embers,
-    /// and sparks downward; buoyancy lifts gases and fire upward.
+    /// and sparks downward; atmosphere-aware buoyancy lifts gases and fire.
     ///
     /// Adds ±GRAVITY_PER_TICK to vy_frac each force tick, carrying to vy when
     /// vy_frac crosses ±4. Fixed combined velocity = vy*4 + vy_frac, clamped
@@ -841,7 +856,7 @@ impl World {
         {
             Some(GRAVITY_PER_TICK) // gravity: positive = down
         } else if matches!(material, Fire | Steam | Smoke) {
-            Some(-GRAVITY_PER_TICK) // buoyancy: negative = up
+            Some(self.visible_gas_buoyancy(i))
         } else {
             None
         };
@@ -1687,18 +1702,39 @@ mod tests {
     }
 
     #[test]
+    fn visible_gas_buoyancy_responds_to_heat_and_air_density() {
+        let mut world = World::new(3, 1);
+        let ambient = world.idx(0, 0);
+        let hot = world.idx(1, 0);
+        let vacuum = world.idx(2, 0);
+        for i in [ambient, hot, vacuum] {
+            world.grid[i] = Smoke;
+        }
+        world.temp[hot] = 620;
+        world.air_mass[vacuum] = 0;
+
+        world.apply_vertical_force(ambient);
+        world.apply_vertical_force(hot);
+        world.apply_vertical_force(vacuum);
+
+        assert_eq!(world.vy_frac[ambient], -1);
+        assert!(world.vy_frac[hot] < world.vy_frac[ambient]);
+        assert_eq!(world.vy_frac[vacuum], 0);
+    }
+
+    #[test]
     fn gas_buoyancy_accumulates_before_moving() {
         let mut world = World::new(5, 8);
-        world.paint(2, 6, Steam);
-        let steam_i = world.idx(2, 6);
-        world.temp[steam_i] = 500;
+        world.paint(2, 6, Smoke);
+        let gas_i = world.idx(2, 6);
+        world.temp[gas_i] = AMBIENT_TEMP;
 
         world.step();
-        assert_eq!(world.get(2, 6), Steam);
+        assert_eq!(world.get(2, 6), Smoke);
         world.step();
-        assert_eq!(world.get(2, 6), Steam);
+        assert_eq!(world.get(2, 6), Smoke);
         world.step();
-        assert_eq!(world.get(2, 5), Steam);
+        assert_eq!(world.get(2, 5), Smoke);
         let i = world.idx(2, 5);
         assert_eq!(
             (world.vy[i], world.vy_frac[i], world.y_frac[i]),

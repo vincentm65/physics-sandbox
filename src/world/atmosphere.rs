@@ -22,9 +22,14 @@ fn clamp_mass(v: i16) -> i16 {
     v.clamp(0, MAX_AIR_MASS)
 }
 
-/// Total non‑ambient species mass in a cell.
+/// Total explicitly tracked species mass in a cell. The remainder is inert air.
 fn species_total(o2: i16, exhaust: i16, fuel_vapor: i16) -> i16 {
     o2.saturating_add(exhaust).saturating_add(fuel_vapor)
+}
+
+/// Absolute fixed-point temperature used by the ideal-gas calculations.
+fn temp_k(temp: i16) -> i32 {
+    (temp as i32).max(-200) + 273
 }
 
 // ── Public methods on World ───────────────────────────────────────────────
@@ -282,7 +287,9 @@ impl World {
                         // Down neighbour.
                         if y + 1 < self.height {
                             let di = self.idx(x, y + 1);
-                            if cell_is_passable(self.grid[di]) && self.transport_pair(i, di) {
+                            if cell_is_passable(self.grid[di])
+                                && self.transport_vertical_pair(i, di)
+                            {
                                 self.activate_next(x, y);
                                 self.activate_next(x, y + 1);
                             }
@@ -323,9 +330,40 @@ impl World {
         }
     }
 
-    /// Transport air mass and proportional species between two adjacent
-    /// passable cells.  Moves from higher‑mass to lower‑mass, capped at
-    /// MAX_TRANSPORT, and carries species proportionally.
+    /// Vertical transport includes molecular-weight stratification. Compare the
+    /// final state so a stable stratified pair can become inactive.
+    fn transport_vertical_pair(&mut self, upper: usize, lower: usize) -> bool {
+        let before = (
+            self.air_mass[upper],
+            self.air_mass[lower],
+            self.o2[upper],
+            self.o2[lower],
+            self.exhaust[upper],
+            self.exhaust[lower],
+            self.fuel_vapor[upper],
+            self.fuel_vapor[lower],
+            self.temp[upper],
+            self.temp[lower],
+        );
+        self.transport_pair(upper, lower);
+        self.stratify_species(upper, lower);
+        before
+            != (
+                self.air_mass[upper],
+                self.air_mass[lower],
+                self.o2[upper],
+                self.o2[lower],
+                self.exhaust[upper],
+                self.exhaust[lower],
+                self.fuel_vapor[upper],
+                self.fuel_vapor[lower],
+                self.temp[upper],
+                self.temp[lower],
+            )
+    }
+
+    /// Transport air between adjacent passable cells toward equal pressure.
+    /// The bounded packet carries heat; gas species then mix conservatively.
     fn transport_pair(&mut self, a: usize, b: usize) -> bool {
         let before = (
             self.air_mass[a],
@@ -336,49 +374,62 @@ impl World {
             self.exhaust[b],
             self.fuel_vapor[a],
             self.fuel_vapor[b],
+            self.temp[a],
+            self.temp[b],
         );
-        let mass_a = self.air_mass[a];
-        let mass_b = self.air_mass[b];
-        if mass_a == mass_b {
-            // Equalise species anyway.
-            self.equalize_species(a, b);
-            return before
-                != (
-                    self.air_mass[a],
-                    self.air_mass[b],
-                    self.o2[a],
-                    self.o2[b],
-                    self.exhaust[a],
-                    self.exhaust[b],
-                    self.fuel_vapor[a],
-                    self.fuel_vapor[b],
-                );
+        let pressure_a = self.air_mass[a] as i32 * temp_k(self.temp[a]);
+        let pressure_b = self.air_mass[b] as i32 * temp_k(self.temp[b]);
+        let (src, dst) = if pressure_a > pressure_b {
+            (a, b)
+        } else {
+            (b, a)
+        };
+        let src_mass = self.air_mass[src].max(0) as i32;
+        let dst_mass = self.air_mass[dst].max(0) as i32;
+        let src_temp_k = temp_k(self.temp[src]);
+        let dst_temp_k = temp_k(self.temp[dst]);
+        let pressure_diff = (src_mass * src_temp_k - dst_mass * dst_temp_k).max(0);
+        let equilibrium_packet = pressure_diff / (src_temp_k + dst_temp_k).max(1);
+        let transport = equilibrium_packet
+            .min(MAX_TRANSPORT as i32)
+            .min(src_mass)
+            .min(MAX_AIR_MASS as i32 - dst_mass) as i16;
+
+        if transport == 0
+            && self.o2[a] == self.o2[b]
+            && self.exhaust[a] == self.exhaust[b]
+            && self.fuel_vapor[a] == self.fuel_vapor[b]
+        {
+            return false;
         }
 
-        let (src, dst) = if mass_a > mass_b { (a, b) } else { (b, a) };
-        let src_mass = self.air_mass[src];
-        let dst_mass = self.air_mass[dst];
-        let diff = src_mass.saturating_sub(dst_mass);
-        let transport = MAX_TRANSPORT.min(diff / 2).min(src_mass);
-        if transport == 0 {
-            self.equalize_species(a, b);
-            return before
-                != (
-                    self.air_mass[a],
-                    self.air_mass[b],
-                    self.o2[a],
-                    self.o2[b],
-                    self.exhaust[a],
-                    self.exhaust[b],
-                    self.fuel_vapor[a],
-                    self.fuel_vapor[b],
-                );
+        if transport > 0 {
+            self.air_mass[src] = clamp_mass(self.air_mass[src] - transport);
+            self.air_mass[dst] = clamp_mass(self.air_mass[dst] + transport);
+
+            // A homogeneous source keeps its temperature. The destination mixes
+            // the incoming packet's thermal energy with its existing air.
+            let mixed_mass = dst_mass + transport as i32;
+            if mixed_mass > 0 {
+                let mixed_k = (dst_mass * dst_temp_k + transport as i32 * src_temp_k) / mixed_mass;
+                self.temp[dst] = (mixed_k - 273).clamp(-200, 1_500) as i16;
+            }
         }
 
-        self.air_mass[src] = clamp_mass(src_mass.saturating_sub(transport));
-        self.air_mass[dst] = clamp_mass(dst_mass.saturating_add(transport));
         self.equalize_species(a, b);
-        true
+        before
+            != (
+                self.air_mass[a],
+                self.air_mass[b],
+                self.o2[a],
+                self.o2[b],
+                self.exhaust[a],
+                self.exhaust[b],
+                self.fuel_vapor[a],
+                self.fuel_vapor[b],
+                self.temp[a],
+                self.temp[b],
+            )
     }
 
     /// Conservatively equalize each species concentration between two cells.
@@ -409,54 +460,153 @@ impl World {
         self.exhaust[b] = (totals[1] - a_shares[1]) as i16;
         self.fuel_vapor[a] = a_shares[2] as i16;
         self.fuel_vapor[b] = (totals[2] - a_shares[2]) as i16;
+        self.clamp_species_to_mass(a);
+        self.clamp_species_to_mass(b);
     }
 
-    /// Vent a cell at the world edge toward ambient atmosphere.
+    /// Apply a one-unit gravitational drift to tracked gases after ordinary
+    /// mixing. Molecular weight is compared at local absolute temperature, so
+    /// cool oxygen/combustion products settle while sufficiently hot gas rises.
+    fn stratify_species(&mut self, upper: usize, lower: usize) -> bool {
+        let mut changed = false;
+        changed |= self.stratify_component(upper, lower, 0, 32);
+        changed |= self.stratify_component(upper, lower, 1, 44);
+        changed |= self.stratify_component(upper, lower, 2, 44);
+        changed
+    }
+
+    fn stratify_component(
+        &mut self,
+        upper: usize,
+        lower: usize,
+        component: u8,
+        molecular_weight: i32,
+    ) -> bool {
+        let values = match component {
+            0 => (self.o2[upper], self.o2[lower]),
+            1 => (self.exhaust[upper], self.exhaust[lower]),
+            _ => (self.fuel_vapor[upper], self.fuel_vapor[lower]),
+        };
+        let upper_inert = self.air_mass[upper]
+            .saturating_sub(species_total(
+                self.o2[upper],
+                self.exhaust[upper],
+                self.fuel_vapor[upper],
+            ))
+            .max(0);
+        let lower_inert = self.air_mass[lower]
+            .saturating_sub(species_total(
+                self.o2[lower],
+                self.exhaust[lower],
+                self.fuel_vapor[lower],
+            ))
+            .max(0);
+        let ambient_k = temp_k(AMBIENT_TEMP);
+        let upper_weight = molecular_weight * ambient_k / temp_k(self.temp[upper]);
+        let lower_weight = molecular_weight * ambient_k / temp_k(self.temp[lower]);
+
+        let (new_upper, new_lower) = if lower_weight < 28
+            && lower_weight < upper_weight
+            && values.1 > 0
+            && upper_inert > 0
+        {
+            (values.0 + 1, values.1 - 1)
+        } else if upper_weight > 28
+            && upper_weight >= lower_weight
+            && values.0 > 0
+            && lower_inert > 0
+        {
+            (values.0 - 1, values.1 + 1)
+        } else {
+            return false;
+        };
+
+        match component {
+            0 => {
+                self.o2[upper] = new_upper;
+                self.o2[lower] = new_lower;
+            }
+            1 => {
+                self.exhaust[upper] = new_upper;
+                self.exhaust[lower] = new_lower;
+            }
+            _ => {
+                self.fuel_vapor[upper] = new_upper;
+                self.fuel_vapor[lower] = new_lower;
+            }
+        }
+        true
+    }
+
+    /// Preserve the tracked-mixture invariant after chemistry or external input.
+    fn clamp_species_to_mass(&mut self, i: usize) {
+        self.o2[i] = clamp_mass(self.o2[i]);
+        self.exhaust[i] = clamp_mass(self.exhaust[i]);
+        self.fuel_vapor[i] = clamp_mass(self.fuel_vapor[i]);
+        let mut excess = species_total(self.o2[i], self.exhaust[i], self.fuel_vapor[i])
+            .saturating_sub(self.air_mass[i].max(0))
+            .max(0);
+        let trim_fuel = excess.min(self.fuel_vapor[i]);
+        self.fuel_vapor[i] -= trim_fuel;
+        excess -= trim_fuel;
+        let trim_exhaust = excess.min(self.exhaust[i]);
+        self.exhaust[i] -= trim_exhaust;
+        excess -= trim_exhaust;
+        self.o2[i] = self.o2[i].saturating_sub(excess);
+    }
+
+    /// Exchange an edge cell with the infinite ambient reservoir. Pressure flow
+    /// and composition mixing are independent, so exhaust clears at 1 atm too.
     fn vent_to_ambient(&mut self, i: usize) {
         let before = (
             self.air_mass[i],
             self.o2[i],
             self.exhaust[i],
             self.fuel_vapor[i],
+            self.temp[i],
         );
-        let mass = self.air_mass[i];
-        if mass <= AMBIENT_AIR_MASS {
-            // Pull ambient-composition air into the cell.
-            let deficit = AMBIENT_AIR_MASS.saturating_sub(mass);
-            if deficit > 0 {
-                let pull = MAX_TRANSPORT.min(deficit);
-                let new_mass = clamp_mass(mass.saturating_add(pull));
-                self.air_mass[i] = new_mass;
-                let composition_o2 =
-                    |air_mass: i16| air_mass as i32 * AMBIENT_O2 as i32 / AMBIENT_AIR_MASS as i32;
-                let ambient_o2 = (composition_o2(new_mass) - composition_o2(mass)) as i16;
-                self.o2[i] = clamp_mass(self.o2[i].saturating_add(ambient_o2));
-            }
-        } else {
-            // Surplus: vent out.
-            let excess = mass.saturating_sub(AMBIENT_AIR_MASS);
-            let vent = MAX_TRANSPORT.min(excess).min(mass);
+        let mass = self.air_mass[i].max(0);
+        let local_k = temp_k(self.temp[i]);
+        let ambient_k = temp_k(AMBIENT_TEMP);
+        let target_mass = ((AMBIENT_AIR_MASS as i32 * ambient_k + local_k / 2) / local_k)
+            .clamp(0, MAX_AIR_MASS as i32) as i16;
 
-            self.air_mass[i] = clamp_mass(mass.saturating_sub(vent));
-
-            // Species vent proportionally.
-            let total = mass.max(1) as i32;
-            let vent_o2 = ((self.o2[i] as i32 * vent as i32) / total).min(self.o2[i] as i32) as i16;
-            let vent_exhaust =
-                ((self.exhaust[i] as i32 * vent as i32) / total).min(self.exhaust[i] as i32) as i16;
-            let vent_vapor = ((self.fuel_vapor[i] as i32 * vent as i32) / total)
-                .min(self.fuel_vapor[i] as i32) as i16;
-
-            self.o2[i] = clamp_mass(self.o2[i].saturating_sub(vent_o2));
-            self.exhaust[i] = clamp_mass(self.exhaust[i].saturating_sub(vent_exhaust));
-            self.fuel_vapor[i] = clamp_mass(self.fuel_vapor[i].saturating_sub(vent_vapor));
+        if mass < target_mass {
+            let pull = MAX_TRANSPORT.min(target_mass - mass);
+            let new_mass = mass + pull;
+            let mixed_k =
+                (mass as i32 * local_k + pull as i32 * ambient_k) / new_mass.max(1) as i32;
+            self.air_mass[i] = new_mass;
+            self.temp[i] = (mixed_k - 273).clamp(-200, 1_500) as i16;
+            let ambient_share =
+                |air_mass: i16| air_mass as i32 * AMBIENT_O2 as i32 / AMBIENT_AIR_MASS as i32;
+            self.o2[i] =
+                clamp_mass(self.o2[i] + (ambient_share(new_mass) - ambient_share(mass)) as i16);
+        } else if mass > target_mass {
+            let vent = MAX_TRANSPORT.min(mass - target_mass);
+            let remaining = mass - vent;
+            let retain = |species: i16| species as i32 * remaining as i32 / mass.max(1) as i32;
+            self.air_mass[i] = remaining;
+            self.o2[i] = retain(self.o2[i]) as i16;
+            self.exhaust[i] = retain(self.exhaust[i]) as i16;
+            self.fuel_vapor[i] = retain(self.fuel_vapor[i]) as i16;
         }
+
+        // Molecular exchange occurs without net mass flow. Move each tracked
+        // species one fixed-point unit toward ambient composition per tick.
+        let ambient_o2 = self.air_mass[i] as i32 * AMBIENT_O2 as i32 / AMBIENT_AIR_MASS as i32;
+        self.o2[i] += (ambient_o2 as i16 - self.o2[i]).signum();
+        self.exhaust[i] = self.exhaust[i].saturating_sub(1);
+        self.fuel_vapor[i] = self.fuel_vapor[i].saturating_sub(1);
+        self.clamp_species_to_mass(i);
+
         if before
             != (
                 self.air_mass[i],
                 self.o2[i],
                 self.exhaust[i],
                 self.fuel_vapor[i],
+                self.temp[i],
             )
         {
             self.activate_idx(i);
@@ -908,6 +1058,7 @@ mod tests {
 
         assert_eq!(w.o2[a] + w.o2[b], 1);
         assert_eq!(w.exhaust[a] + w.exhaust[b], 1);
+        assert_eq!(w.fuel_vapor[a] + w.fuel_vapor[b], 0);
         assert!(species_total(w.o2[a], w.exhaust[a], w.fuel_vapor[a]) <= w.air_mass[a]);
         assert!(species_total(w.o2[b], w.exhaust[b], w.fuel_vapor[b]) <= w.air_mass[b]);
     }
@@ -939,6 +1090,80 @@ mod tests {
         assert_eq!(w.air_mass[i], AMBIENT_AIR_MASS);
         assert_eq!(w.o2[i], AMBIENT_O2);
         assert!(w.next_active_chunks.iter().any(|&active| active));
+    }
+
+    #[test]
+    fn hot_air_pressure_drives_flow_and_carries_heat() {
+        let mut w = World::new(2, 1);
+        let hot = w.idx(0, 0);
+        let cool = w.idx(1, 0);
+        w.air_mass[hot] = AMBIENT_AIR_MASS;
+        w.air_mass[cool] = AMBIENT_AIR_MASS;
+        w.temp[hot] = 500;
+        w.temp[cool] = AMBIENT_TEMP;
+
+        assert!(w.transport_pair(hot, cool));
+        assert!(w.air_mass[hot] < AMBIENT_AIR_MASS);
+        assert!(w.air_mass[cool] > AMBIENT_AIR_MASS);
+        assert!(w.temp[cool] > AMBIENT_TEMP, "moving air should carry heat");
+    }
+
+    #[test]
+    fn vertical_transport_settles_cool_heavy_exhaust() {
+        let mut w = World::new(1, 2);
+        let upper = w.idx(0, 0);
+        let lower = w.idx(0, 1);
+        w.o2[upper] = 0;
+        w.o2[lower] = 0;
+        w.exhaust[upper] = 4;
+        w.exhaust[lower] = 0;
+
+        assert!(w.transport_vertical_pair(upper, lower));
+
+        assert_eq!(w.exhaust[upper] + w.exhaust[lower], 4);
+        assert!(
+            w.exhaust[lower] > w.exhaust[upper],
+            "expected cool exhaust to settle, got {:?}",
+            (w.exhaust[upper], w.exhaust[lower])
+        );
+    }
+
+    #[test]
+    fn vertical_transport_lifts_hot_exhaust() {
+        let mut w = World::new(1, 2);
+        let upper = w.idx(0, 0);
+        let lower = w.idx(0, 1);
+        w.o2[upper] = 0;
+        w.o2[lower] = 0;
+        w.exhaust[upper] = 0;
+        w.exhaust[lower] = 4;
+        w.temp[lower] = 500;
+
+        assert!(w.transport_vertical_pair(upper, lower));
+
+        assert_eq!(w.exhaust[upper] + w.exhaust[lower], 4);
+        assert!(
+            w.exhaust[upper] > w.exhaust[lower],
+            "expected hot exhaust to rise, got {:?}",
+            (w.exhaust[upper], w.exhaust[lower])
+        );
+    }
+
+    #[test]
+    fn normal_pressure_edge_exchange_clears_exhaust() {
+        let mut w = World::new(1, 1);
+        let i = w.idx(0, 0);
+        w.o2[i] = 0;
+        w.exhaust[i] = 8;
+        let mass = w.air_mass[i];
+
+        for _ in 0..8 {
+            w.vent_to_ambient(i);
+        }
+
+        assert_eq!(w.air_mass[i], mass);
+        assert_eq!(w.exhaust[i], 0);
+        assert!(w.o2[i] > 0);
     }
 
     // ── Disabled state freeze / reset ───────────────────────────────

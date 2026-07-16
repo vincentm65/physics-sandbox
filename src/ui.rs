@@ -26,6 +26,7 @@ pub fn draw(frame: &mut Frame, world: &World, app: &App) {
         area.height.saturating_sub(MAX_STATUS_ROWS),
     );
     draw_grid(frame, world, app, &grid_area);
+    draw_overlay_legend(frame, app.atmos_overlay, &grid_area);
     let sr = status_rows(app, area.width);
     draw_status(frame, app, &area, sr);
     if app.brush_options_open {
@@ -46,44 +47,88 @@ pub fn draw(frame: &mut Frame, world: &World, app: &App) {
     }
 }
 
-fn overlay_color(world: &World, overlay: AtmosOverlay, x: usize, y: usize) -> Option<Color> {
+fn overlay_value_color(overlay: AtmosOverlay, value: i32) -> Option<Color> {
     let scale = |value: i32, max: i32| (value.clamp(0, max) * 255 / max) as u8;
     match overlay {
         AtmosOverlay::None => None,
         AtmosOverlay::Pressure => {
-            let pressure = world.pressure_at(x, y);
-            if pressure <= 256 {
-                let v = scale(pressure, 256);
+            if value <= 256 {
+                let v = scale(value, 256);
                 Some(Color::Rgb(v / 3, v / 2, v))
             } else {
-                let v = scale(pressure - 256, 768);
+                let v = scale(value - 256, 768);
                 Some(Color::Rgb(128 + v / 2, 80u8.saturating_sub(v / 4), 32))
             }
         }
         AtmosOverlay::Oxygen => {
-            let (_, oxygen, _, _) = world.atmosphere_at(x, y);
-            let v = scale(oxygen as i32, 26);
+            let v = scale(value, 26);
             Some(Color::Rgb(0, v, v))
         }
         AtmosOverlay::Fuel => {
-            let (_, _, fuel, _) = world.atmosphere_at(x, y);
-            let v = scale(fuel as i32, 64);
+            let v = scale(value, 64);
             Some(Color::Rgb(v, v / 2, 0))
         }
         AtmosOverlay::Exhaust => {
-            let (_, _, _, exhaust) = world.atmosphere_at(x, y);
-            let v = scale(exhaust as i32, 64);
+            let v = scale(value, 64);
             Some(Color::Rgb(v / 2, v / 3, v))
         }
         AtmosOverlay::Temperature => {
-            let temp = world.temp_at(x, y) as i32;
-            if temp <= 20 {
-                let v = scale(temp + 200, 220);
+            if value <= 20 {
+                let v = scale(value + 200, 220);
                 Some(Color::Rgb(0, v / 2, v))
             } else {
-                let v = scale(temp - 20, 980);
+                let v = scale(value - 20, 980);
                 Some(Color::Rgb(v, 64u8.saturating_sub(v / 4), 0))
             }
+        }
+    }
+}
+
+fn overlay_color(world: &World, overlay: AtmosOverlay, x: usize, y: usize) -> Option<Color> {
+    let value = match overlay {
+        AtmosOverlay::None => return None,
+        AtmosOverlay::Pressure => world.pressure_at(x, y),
+        AtmosOverlay::Oxygen => world.atmosphere_at(x, y).1 as i32,
+        AtmosOverlay::Fuel => world.atmosphere_at(x, y).2 as i32,
+        AtmosOverlay::Exhaust => world.atmosphere_at(x, y).3 as i32,
+        AtmosOverlay::Temperature => world.temp_at(x, y) as i32,
+    };
+    overlay_value_color(overlay, value)
+}
+
+fn draw_overlay_legend(frame: &mut Frame, overlay: AtmosOverlay, area: &Rect) {
+    let (title, min, max, labels) = match overlay {
+        AtmosOverlay::None => return,
+        AtmosOverlay::Pressure => ("Pressure", 0, 1_024, "0   1   4 atm"),
+        AtmosOverlay::Oxygen => ("Oxygen", 0, 26, "0  13  26 units"),
+        AtmosOverlay::Fuel => ("Fuel vapor", 0, 64, "0  32  64 units"),
+        AtmosOverlay::Exhaust => ("Exhaust", 0, 64, "0  32  64 units"),
+        AtmosOverlay::Temperature => ("Temperature", -200, 1_000, "-200  20  1000 C"),
+    };
+    if area.width < 12 || area.height < 2 {
+        return;
+    }
+
+    let text = format!(" {title}: {labels} ");
+    let width = (text.chars().count() as u16).min(area.width);
+    let x = area.x + area.width - width;
+    let bg = Color::Rgb(16, 18, 26);
+    let fg = Color::Rgb(230, 232, 240);
+    let buf = frame.buffer_mut();
+    for offset in 0..width {
+        if let Some(cell) = buf.cell_mut((x + offset, area.y)) {
+            cell.set_char(text.chars().nth(offset as usize).unwrap_or(' '));
+            cell.set_fg(fg);
+            cell.set_bg(bg);
+        }
+        let value = if width <= 1 {
+            min
+        } else {
+            min + (max - min) * offset as i32 / (width - 1) as i32
+        };
+        if let Some(cell) = buf.cell_mut((x + offset, area.y + 1)) {
+            cell.set_char(' ');
+            cell.set_bg(overlay_value_color(overlay, value).unwrap_or(bg));
         }
     }
 }
@@ -502,14 +547,11 @@ fn draw_picker(frame: &mut Frame, area: &Rect, app: &App) {
             app.picker_query
         )
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(title)
-        .style(
-            Style::default()
-                .fg(Color::Rgb(210, 214, 224))
-                .bg(Color::Rgb(18, 20, 30)),
-        );
+    let block = Block::default().borders(Borders::ALL).title(title).style(
+        Style::default()
+            .fg(Color::Rgb(210, 214, 224))
+            .bg(Color::Rgb(18, 20, 30)),
+    );
     frame.render_widget(block, popup);
 
     let buf = frame.buffer_mut();
