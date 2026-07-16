@@ -174,7 +174,7 @@ impl World {
                 self.exhaust[i] =
                     clamp_mass(self.exhaust[i].saturating_add(burn.saturating_mul(2)));
                 self.temp[i] = (self.temp[i] as i32 + burn as i32 * 8).clamp(-200, 1_500) as i16;
-                let overpressure = (burn as i16).min(MAX_AIR_MASS.saturating_sub(self.air_mass[i]));
+                let overpressure = burn.min(MAX_AIR_MASS.saturating_sub(self.air_mass[i]));
                 if overpressure > 0 {
                     self.air_mass[i] = clamp_mass(self.air_mass[i].saturating_add(overpressure));
                 }
@@ -741,8 +741,7 @@ impl World {
                     linear.max(350)
                 };
                 // profile.pressure is in ambient-mass units at the epicentre.
-                let blast_mass = ((AMBIENT_AIR_MASS as i32 * profile.pressure as i32 * strength)
-                    / 1000)
+                let blast_mass = ((AMBIENT_AIR_MASS as i32 * profile.pressure * strength) / 1000)
                     .max(AMBIENT_AIR_MASS as i32 / 4) as i16;
                 let old_mass = self.air_mass[ti];
                 let new_mass = clamp_mass(old_mass.saturating_add(blast_mass));

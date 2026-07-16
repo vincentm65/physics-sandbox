@@ -1,7 +1,7 @@
 //! Headless, deterministic checks for the simulation. Run with `--selftest`.
 //! Lets us verify every material interaction without a terminal attached.
 
-use crate::app::{App, BrushShape, Confirm, EditorTool};
+use crate::app::{App, BrushShape, Confirm, EditorTool, PickerState};
 use crate::material::Material;
 use crate::world::AMBIENT_AIR_MASS;
 use crate::world::AMBIENT_O2;
@@ -655,9 +655,12 @@ fn renders_picker() -> Result<(), String> {
 
     // open: title + the cursor's material name appear
     let app = App {
-        picker_open: true,
+        picker: PickerState {
+            picker_open: true,
+            picker_cursor: 8,
+            ..PickerState::default()
+        },
         // Material::ALL[8] is Fire
-        picker_cursor: 8,
         ..App::default()
     };
     term.draw(|f| crate::ui::draw(f, &w, &app))
@@ -735,7 +738,7 @@ fn terminal_paste_is_only_text_in_save_input() -> Result<(), String> {
     let mut world = World::new(4, 4);
 
     app.handle(&Event::Paste("sample 2".into()), &mut world);
-    if app.scene_menu.open || app.confirm != Confirm::None || app.selected != Sand {
+    if app.scene_menu.open || app.status.confirm != Confirm::None || app.selected != Sand {
         return Err("terminal paste triggered application shortcuts".into());
     }
 
@@ -756,7 +759,10 @@ fn clipboard_shortcuts_work_over_overlays() -> Result<(), String> {
     for mut app in [
         App {
             selection: Some(((1, 1), (1, 1))),
-            picker_open: true,
+            picker: PickerState {
+                picker_open: true,
+                ..PickerState::default()
+            },
             ..App::default()
         },
         App {
@@ -902,7 +908,7 @@ fn quit_and_escape_priority() -> Result<(), String> {
 
     // Esc shows quit confirmation when no overlays are open
     let mut app = App::default();
-    if !app.handle(&escape, &mut world) || app.confirm != Confirm::Quit {
+    if !app.handle(&escape, &mut world) || app.status.confirm != Confirm::Quit {
         return Err("Esc did not show quit confirmation".into());
     }
     // Enter confirms the quit
@@ -912,15 +918,18 @@ fn quit_and_escape_priority() -> Result<(), String> {
 
     // Esc closes the material picker without quitting
     let mut app = App {
-        picker_open: true,
+        picker: PickerState {
+            picker_open: true,
+            ..PickerState::default()
+        },
         ..App::default()
     };
     // First Esc closes picker
-    if !app.handle(&escape, &mut world) || app.picker_open {
+    if !app.handle(&escape, &mut world) || app.picker.picker_open {
         return Err("Esc did not close the material picker".into());
     }
     // Second Esc shows quit confirmation
-    if !app.handle(&escape, &mut world) || app.confirm != Confirm::Quit {
+    if !app.handle(&escape, &mut world) || app.status.confirm != Confirm::Quit {
         return Err("Esc did not show quit confirmation after closing all overlays".into());
     }
     Ok(())
@@ -1008,8 +1017,9 @@ fn restore_saved_scene_clips_to_current_world() -> Result<(), String> {
 fn gunpowder_explosion_damages_its_radius() -> Result<(), String> {
     let mut w = World::new(17, 17);
     let (cx, cy) = (8, 8);
-    for y in 3..=13 {
-        for x in 3..=13 {
+    for x in [cx, cx + 4, cx + 5] {
+        let top = if x == cx + 4 { cy } else { cy + 5 };
+        for y in top..17 {
             w.paint(x, y, Stone);
         }
     }

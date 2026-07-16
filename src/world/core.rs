@@ -20,6 +20,31 @@ impl Scene {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct CellState {
+    pub(super) material: Material,
+    pub(super) life: u16,
+    pub(super) seed: u8,
+    pub(super) temp: i16,
+    pub(super) vx: i8,
+    pub(super) vy: i8,
+    pub(super) vy_frac: i8,
+    pub(super) y_frac: i8,
+    pub(super) vx_frac: i8,
+    pub(super) x_frac: i8,
+    pub(super) air_mass: i16,
+    pub(super) o2: i16,
+    pub(super) exhaust: i16,
+    pub(super) fuel_vapor: i16,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct StructuralMove {
+    pub(super) source: usize,
+    pub(super) target: usize,
+    pub(super) state: CellState,
+}
+
 pub struct World {
     pub width: usize,
     pub height: usize,
@@ -52,23 +77,30 @@ pub struct World {
     pub(super) active_chunks: Vec<bool>,
     pub(super) next_active_chunks: Vec<bool>,
     /// Generation tags for connected-component structural physics.
-    structural_seen: Vec<u32>,
-    structural_generation: u32,
-    structural_stack: Vec<usize>,
-    structural_component: Vec<usize>,
-    structural_ordered: Vec<usize>,
-    structural_membership: Vec<bool>,
-    structural_targets: Vec<bool>,
-    structural_moves: Vec<(usize, usize, u16, u8, i16, i8, i8, i8, i8, i8, i8)>,
-    structural_displaced: Vec<(Material, u16, u8, i16, i8, i8, i8, i8, i8, i8)>,
+    pub(super) structural_seen: Vec<u32>,
+    pub(super) structural_generation: u32,
+    pub(super) structural_stack: Vec<usize>,
+    pub(super) structural_component: Vec<usize>,
+    pub(super) structural_ordered: Vec<usize>,
+    pub(super) structural_membership: Vec<bool>,
+    pub(super) structural_moves: Vec<StructuralMove>,
+    pub(super) structural_displaced: Vec<(usize, CellState)>,
     pub(super) chunks_x: usize,
     pub(super) chunks_y: usize,
     pub(super) tick: u64,
     pub(super) scene: Scene,
+    pub(super) prng: Prng,
 }
 
 impl World {
+    /// Create a new world with the default deterministic seed (42).
     pub fn new(width: usize, height: usize) -> Self {
+        Self::with_seed(width, height, 42)
+    }
+
+    /// Create a new world with an explicit PRNG seed for deterministic
+    /// simulation. Two worlds with the same seed evolve identically.
+    pub fn with_seed(width: usize, height: usize, seed: u64) -> Self {
         let n = width * height;
         Self {
             width,
@@ -98,13 +130,13 @@ impl World {
             structural_component: Vec::new(),
             structural_ordered: Vec::new(),
             structural_membership: vec![false; n],
-            structural_targets: vec![false; n],
             structural_moves: Vec::new(),
             structural_displaced: Vec::new(),
             chunks_x: chunks_x(width),
             chunks_y: chunks_y(height),
             tick: 0,
             scene: Scene::House,
+            prng: Prng::new(seed),
         }
     }
 
@@ -262,8 +294,8 @@ impl World {
             self.exhaust[i] = 0;
             self.fuel_vapor[i] = 0;
         }
-        self.seed[i] = rand::random();
-        self.life[i] = rand_life(m);
+        self.seed[i] = self.prng.next_u8();
+        self.life[i] = self.rand_life(m);
         self.vx[i] = 0;
         self.vy[i] = 0;
         self.vx_frac[i] = 0;
@@ -304,7 +336,7 @@ impl World {
         for i in 0..self.grid.len() {
             self.grid[i] = Empty;
             self.life[i] = 0;
-            self.seed[i] = rand::random();
+            self.seed[i] = self.prng.next_u8();
             self.temp[i] = AMBIENT_TEMP;
         }
         self.vx.fill(0);
@@ -324,7 +356,6 @@ impl World {
         self.structural_component.clear();
         self.structural_ordered.clear();
         self.structural_membership.fill(false);
-        self.structural_targets.fill(false);
         self.structural_moves.clear();
         self.structural_displaced.clear();
     }
@@ -526,7 +557,6 @@ impl World {
         self.structural_component.clear();
         self.structural_ordered.clear();
         self.structural_membership = vec![false; width * height];
-        self.structural_targets = vec![false; width * height];
         self.structural_moves.clear();
         self.structural_displaced.clear();
     }
@@ -561,6 +591,58 @@ impl World {
         );
     }
 
+    pub(super) fn snapshot_state(&self, i: usize) -> CellState {
+        CellState {
+            material: self.grid[i],
+            life: self.life[i],
+            seed: self.seed[i],
+            temp: self.temp[i],
+            vx: self.vx[i],
+            vy: self.vy[i],
+            vy_frac: self.vy_frac[i],
+            y_frac: self.y_frac[i],
+            vx_frac: self.vx_frac[i],
+            x_frac: self.x_frac[i],
+            air_mass: self.air_mass[i],
+            o2: self.o2[i],
+            exhaust: self.exhaust[i],
+            fuel_vapor: self.fuel_vapor[i],
+        }
+    }
+
+    pub(super) fn set_cell_state(&mut self, i: usize, state: CellState) {
+        self.grid[i] = state.material;
+        self.life[i] = state.life;
+        self.seed[i] = state.seed;
+        self.temp[i] = state.temp;
+        self.vx[i] = state.vx;
+        self.vy[i] = state.vy;
+        self.vy_frac[i] = state.vy_frac;
+        self.y_frac[i] = state.y_frac;
+        self.vx_frac[i] = state.vx_frac;
+        self.x_frac[i] = state.x_frac;
+        self.air_mass[i] = state.air_mass;
+        self.o2[i] = state.o2;
+        self.exhaust[i] = state.exhaust;
+        self.fuel_vapor[i] = state.fuel_vapor;
+    }
+
+    pub(super) fn clear_cell_state(&mut self, i: usize) {
+        self.grid[i] = Empty;
+        self.life[i] = 0;
+        self.temp[i] = AMBIENT_TEMP;
+        self.vx[i] = 0;
+        self.vy[i] = 0;
+        self.vy_frac[i] = 0;
+        self.y_frac[i] = 0;
+        self.vx_frac[i] = 0;
+        self.x_frac[i] = 0;
+        self.air_mass[i] = AMBIENT_AIR_MASS;
+        self.o2[i] = AMBIENT_O2;
+        self.exhaust[i] = 0;
+        self.fuel_vapor[i] = 0;
+    }
+
     pub(super) fn put(&mut self, i: usize, m: Material, life: u16) {
         let prev_temp = self.temp[i];
         let was_passable = self.is_gas_permeable(i);
@@ -577,7 +659,7 @@ impl World {
             self.fuel_vapor[i] = 0;
         }
         self.life[i] = life;
-        self.seed[i] = rand::random();
+        self.seed[i] = self.prng.next_u8();
         self.vx[i] = 0;
         self.vy[i] = 0;
         self.vx_frac[i] = 0;
@@ -596,20 +678,10 @@ impl World {
     }
 
     pub(super) fn swap(&mut self, a: usize, b: usize) {
-        self.grid.swap(a, b);
-        self.life.swap(a, b);
-        self.seed.swap(a, b);
-        self.vx.swap(a, b);
-        self.vy.swap(a, b);
-        self.vx_frac.swap(a, b);
-        self.x_frac.swap(a, b);
-        self.vy_frac.swap(a, b);
-        self.y_frac.swap(a, b);
-        self.temp.swap(a, b);
-        self.air_mass.swap(a, b);
-        self.o2.swap(a, b);
-        self.exhaust.swap(a, b);
-        self.fuel_vapor.swap(a, b);
+        let a_state = self.snapshot_state(a);
+        let b_state = self.snapshot_state(b);
+        self.set_cell_state(a, b_state);
+        self.set_cell_state(b, a_state);
         self.moved_tick[a] = self.tick;
         self.moved_tick[b] = self.tick;
         self.activate_idx(a);
@@ -624,250 +696,6 @@ impl World {
         } else {
             None
         }
-    }
-
-    /// Try to move the cell at `(x, y)` one step in `(dx, dy)` if `allow`
-    /// accepts the target. Returns true if it moved.
-    pub(super) fn try_step(
-        &mut self,
-        x: usize,
-        y: usize,
-        dx: i32,
-        dy: i32,
-        allow: impl Fn(Material) -> bool,
-    ) -> bool {
-        self.adj(x, y, dx, dy)
-            .is_some_and(|(tx, ty)| self.try_into(x, y, tx, ty, allow))
-    }
-
-    pub(super) fn try_into(
-        &mut self,
-        x: usize,
-        y: usize,
-        tx: usize,
-        ty: usize,
-        allow: impl Fn(Material) -> bool,
-    ) -> bool {
-        let ti = self.idx(tx, ty);
-        if allow(self.grid[ti]) {
-            self.swap(self.idx(x, y), ti);
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Trace the cell at `(x, y)` along its stored velocity vector (clamped
-    /// vx/vy) using integer DDA (Bresenham-style) so the line passes through
-    /// each intermediate cell with no tunneling. Returns true if the cell
-    /// moved at least one step.
-    ///
-    /// Effective vertical displacement each tick is computed by accumulating
-    /// `y_frac + vy_frac` into a carry and remainder, using `dy = vy + carry`.
-    /// Fractional sub-cell state is carried through swaps and cleared on
-    /// vertical collision / OOB.
-    ///
-    /// * Pure horizontal steps require `target == Empty`.
-    /// * Downward steps (dy > 0) use density-based displacement
-    ///   (`material.can_sink_into`).
-    /// * Upward steps (dy < 0) require Empty or a lighter fluid.
-    /// * Diagonal advances are split into cardinal steps so occupied corners
-    ///   cannot be skipped.
-    ///
-    /// When a component is blocked, traversal stops after zeroing that velocity
-    /// component on the moving cell. Returns true if the cell changed position.
-    pub(super) fn try_velocity_move(&mut self, x: usize, y: usize) -> bool {
-        let i = self.idx(x, y);
-        let vx = self.vx[i];
-        let vy = self.vy[i];
-        let vx_frac = self.vx_frac[i];
-        let x_frac = self.x_frac[i];
-        let vy_frac = self.vy_frac[i];
-        let y_frac = self.y_frac[i];
-
-        // Compute effective integer displacements from fixed-point state.
-        // Horizontal and vertical axes both use quarter-cell fractions so small
-        // blast/pressure impulses eventually produce whole-cell movement.
-        let x_sum = (x_frac as i16) + (vx_frac as i16);
-        let x_carry = x_sum / (VELOCITY_SCALE as i16);
-        let new_x_frac = x_sum % (VELOCITY_SCALE as i16);
-        let dx = (vx as i16 + x_carry) as i8;
-
-        let y_sum = (y_frac as i16) + (vy_frac as i16);
-        let y_carry = y_sum / (VELOCITY_SCALE as i16);
-        let new_y_frac = y_sum % (VELOCITY_SCALE as i16);
-        let dy = (vy as i16 + y_carry) as i8;
-
-        // Write back updated sub-cell positions before any movement.
-        self.x_frac[i] = new_x_frac as i8;
-        self.y_frac[i] = new_y_frac as i8;
-
-        if dx == 0 && dy == 0 {
-            // No integer movement this tick, but if sub-cell motion exists,
-            // keep the cell active so acceleration (gravity/impulse) continues.
-            if vx != 0
-                || vy != 0
-                || vx_frac != 0
-                || vy_frac != 0
-                || new_x_frac != 0
-                || new_y_frac != 0
-            {
-                self.activate_idx(i);
-            }
-            return false;
-        }
-
-        let material = self.grid[i];
-        // Only non-structural movable materials use velocity-driven movement.
-        if !material.is_fluid() {
-            return false;
-        }
-
-        let sx = dx.signum() as i32;
-        let sy = dy.signum() as i32;
-        let adx = dx.unsigned_abs() as i32;
-        let ady = dy.unsigned_abs() as i32;
-        let steps = adx.max(ady);
-
-        let mut cx = x as i32;
-        let mut cy = y as i32;
-        let mut nom = 0i32;
-        let mut moved = false;
-
-        for _ in 0..steps {
-            let step_x: bool;
-            let step_y: bool;
-
-            if adx >= ady {
-                step_x = true;
-                nom += ady;
-                step_y = nom >= adx;
-                if step_y {
-                    nom -= adx;
-                }
-            } else {
-                step_y = true;
-                nom += adx;
-                step_x = nom >= ady;
-                if step_x {
-                    nom -= ady;
-                }
-            }
-
-            let mut blocked = false;
-
-            // Split diagonal advances into cardinal steps. This checks both cells
-            // touched at a corner instead of tunneling between them.
-            if step_x {
-                let nx = cx + sx;
-                let ci = self.idx(cx as usize, cy as usize);
-                if nx < 0 || nx >= self.width as i32 {
-                    self.vx[ci] = 0;
-                    self.vx_frac[ci] = 0;
-                    self.x_frac[ci] = 0;
-                    blocked = true;
-                } else {
-                    let ni = self.idx(nx as usize, cy as usize);
-                    if self.grid[ni].is_empty() {
-                        self.swap(ci, ni);
-                        cx = nx;
-                        moved = true;
-                    } else {
-                        self.vx[ci] = 0;
-                        self.vx_frac[ci] = 0;
-                        self.x_frac[ci] = 0;
-                        blocked = true;
-                    }
-                }
-            }
-
-            if step_y {
-                let ny = cy + sy;
-                let ci = self.idx(cx as usize, cy as usize);
-                if ny < 0 || ny >= self.height as i32 {
-                    self.vy[ci] = 0;
-                    self.vy_frac[ci] = 0;
-                    self.y_frac[ci] = 0;
-                    blocked = true;
-                } else {
-                    let ni = self.idx(cx as usize, ny as usize);
-                    let target = self.grid[ni];
-                    let allowed = if sy > 0 {
-                        material.can_sink_into(target)
-                    } else {
-                        target.is_empty()
-                            || (target.is_fluid() && material.density() < target.density())
-                    };
-                    if allowed {
-                        self.swap(ci, ni);
-                        cy = ny;
-                        moved = true;
-                    } else {
-                        self.vy[ci] = 0;
-                        self.vy_frac[ci] = 0;
-                        self.y_frac[ci] = 0;
-                        blocked = true;
-                    }
-                }
-            }
-
-            if blocked {
-                break;
-            }
-        }
-
-        moved
-    }
-
-    /// Whether the current fixed-point velocity produces a whole vertical step.
-    pub(super) fn has_vertical_step(&self, i: usize) -> bool {
-        self.vy[i] != 0
-            || (self.y_frac[i] as i16 + self.vy_frac[i] as i16).unsigned_abs()
-                >= VELOCITY_SCALE as u16
-    }
-
-    /// Atmosphere-aware lift for visible gas materials. Buoyancy vanishes in a
-    /// near-vacuum, strengthens in dense air, and increases with gas temperature.
-    fn visible_gas_buoyancy(&self, i: usize) -> i8 {
-        if !self.atmos_enabled {
-            return -GRAVITY_PER_TICK;
-        }
-        let air = self.air_mass[i].max(0) as i32;
-        if air < AMBIENT_AIR_MASS as i32 / 8 {
-            return 0;
-        }
-        let density_lift = (air + AMBIENT_AIR_MASS as i32 - 1) / AMBIENT_AIR_MASS as i32;
-        let thermal_lift = (self.temp[i] as i32 - AMBIENT_TEMP as i32).max(0) / 300;
-        -(density_lift + thermal_lift).clamp(1, 4) as i8
-    }
-
-    /// Apply the appropriate vertical force to the cell at `i` based on its
-    /// material classification. Gravity accelerates powders, liquids, embers,
-    /// and sparks downward; atmosphere-aware buoyancy lifts gases and fire.
-    ///
-    /// Adds ±GRAVITY_PER_TICK to vy_frac each force tick, carrying to vy when
-    /// vy_frac crosses ±4. Fixed combined velocity = vy*4 + vy_frac, clamped
-    /// to ±MAX_VELOCITY*4.
-    pub(super) fn apply_vertical_force(&mut self, i: usize) {
-        let material = self.grid[i];
-        let force = if matches!(material, Sand | BrokenGlass | Ash | Salt | Gunpowder | Coal)
-            || material.is_liquid()
-            || matches!(material, Ember | FireworkSpark)
-        {
-            Some(GRAVITY_PER_TICK) // gravity: positive = down
-        } else if matches!(material, Fire | Steam | Smoke) {
-            Some(self.visible_gas_buoyancy(i))
-        } else {
-            None
-        };
-        let Some(f) = force else { return };
-
-        // Combine vy and vy_frac into fixed velocity, add force, clamp, and split back.
-        let fixed = (self.vy[i] as i16) * (VELOCITY_SCALE as i16) + (self.vy_frac[i] as i16);
-        let max_fixed = (MAX_VELOCITY as i16) * (VELOCITY_SCALE as i16);
-        let new_fixed = (fixed + f as i16).clamp(-max_fixed, max_fixed);
-        self.vy[i] = (new_fixed / VELOCITY_SCALE as i16) as i8;
-        self.vy_frac[i] = (new_fixed % VELOCITY_SCALE as i16) as i8;
     }
 
     pub(super) fn noise(&self, x: usize, y: usize, salt: u32) -> u32 {
@@ -932,279 +760,6 @@ impl World {
             }
         }
         out
-    }
-
-    pub(super) fn structural_can_displace(&self, material: Material, other: Material) -> bool {
-        other.is_empty()
-            || other.is_gas()
-            || (other.is_fluid() && material.density() > other.density())
-    }
-
-    pub(super) fn component_can_translate(
-        &self,
-        material: Material,
-        component: &[usize],
-        in_component: &[bool],
-        dx: i32,
-        dy: i32,
-    ) -> bool {
-        component.iter().all(|&i| {
-            let x = i % self.width;
-            let y = i / self.width;
-            let Some((tx, ty)) = self.adj(x, y, dx, dy) else {
-                return false;
-            };
-            let ti = self.idx(tx, ty);
-            in_component[ti] || self.structural_can_displace(material, self.grid[ti])
-        })
-    }
-
-    pub(super) fn translate_structural_component(
-        &mut self,
-        material: Material,
-        component: &[usize],
-        in_component: &[bool],
-        dx: i32,
-        dy: i32,
-    ) {
-        let mut ordered = std::mem::take(&mut self.structural_ordered);
-        ordered.clear();
-        ordered.extend_from_slice(component);
-        ordered.sort_unstable_by(|&a, &b| {
-            let ax = a % self.width;
-            let ay = a / self.width;
-            let bx = b % self.width;
-            let by = b / self.width;
-            match dy.cmp(&0) {
-                std::cmp::Ordering::Greater => by.cmp(&ay),
-                std::cmp::Ordering::Less => ay.cmp(&by),
-                std::cmp::Ordering::Equal => match dx.cmp(&0) {
-                    std::cmp::Ordering::Greater => bx.cmp(&ax),
-                    std::cmp::Ordering::Less => ax.cmp(&bx),
-                    std::cmp::Ordering::Equal => std::cmp::Ordering::Equal,
-                },
-            }
-        });
-
-        let mut target_set = std::mem::take(&mut self.structural_targets);
-        target_set.fill(false);
-        let mut moves = std::mem::take(&mut self.structural_moves);
-        moves.clear();
-        let mut displaced = std::mem::take(&mut self.structural_displaced);
-        displaced.clear();
-        for &i in &ordered {
-            let x = i % self.width;
-            let y = i / self.width;
-            let (tx, ty) = self
-                .adj(x, y, dx, dy)
-                .expect("prechecked structural translation");
-            let ti = self.idx(tx, ty);
-            target_set[ti] = true;
-            moves.push((
-                i,
-                ti,
-                self.life[i],
-                self.seed[i],
-                self.temp[i],
-                self.vx[i],
-                self.vy[i],
-                self.vy_frac[i],
-                self.y_frac[i],
-                self.vx_frac[i],
-                self.x_frac[i],
-            ));
-            if !in_component[ti] && self.grid[ti] != Empty {
-                displaced.push((
-                    self.grid[ti],
-                    self.life[ti],
-                    self.seed[ti],
-                    self.temp[ti],
-                    self.vx[ti],
-                    self.vy[ti],
-                    self.vy_frac[ti],
-                    self.y_frac[ti],
-                    self.vx_frac[ti],
-                    self.x_frac[ti],
-                ));
-            }
-        }
-
-        for &(i, _, _, _, _, _, _, _, _, _, _) in &moves {
-            self.grid[i] = Empty;
-            self.life[i] = 0;
-            self.vx[i] = 0;
-            self.vy[i] = 0;
-            self.vx_frac[i] = 0;
-            self.x_frac[i] = 0;
-            self.vy_frac[i] = 0;
-            self.y_frac[i] = 0;
-            self.temp[i] = AMBIENT_TEMP;
-            self.moved_tick[i] = self.tick;
-            self.activate_idx(i);
-        }
-        for &(_, ti, life, seed, temp, vx, vy, vy_frac, y_frac, vx_frac, x_frac) in &moves {
-            self.grid[ti] = material;
-            self.life[ti] = life;
-            self.seed[ti] = seed;
-            self.temp[ti] = temp;
-            self.vx[ti] = vx;
-            self.vy[ti] = vy;
-            self.vy_frac[ti] = vy_frac;
-            self.y_frac[ti] = y_frac;
-            self.vx_frac[ti] = vx_frac;
-            self.x_frac[ti] = x_frac;
-            self.moved_tick[ti] = self.tick;
-            self.activate_idx(ti);
-        }
-        for &(i, _, _, _, _, _, _, _, _, _, _) in &moves {
-            if target_set[i] {
-                continue;
-            }
-            if let Some((m, life, seed, temp, vx, vy, vy_frac, y_frac, vx_frac, x_frac)) =
-                displaced.pop()
-            {
-                self.grid[i] = m;
-                self.life[i] = life;
-                self.seed[i] = seed;
-                self.temp[i] = temp;
-                self.vx[i] = vx;
-                self.vy[i] = vy;
-                self.vy_frac[i] = vy_frac;
-                self.y_frac[i] = y_frac;
-                self.vx_frac[i] = vx_frac;
-                self.x_frac[i] = x_frac;
-            }
-        }
-
-        ordered.clear();
-        target_set.fill(false);
-        moves.clear();
-        displaced.clear();
-        self.structural_ordered = ordered;
-        self.structural_targets = target_set;
-        self.structural_moves = moves;
-        self.structural_displaced = displaced;
-    }
-
-    pub(super) fn try_translate_structural_component(
-        &mut self,
-        material: Material,
-        component: &[usize],
-        in_component: &[bool],
-        dx: i32,
-        dy: i32,
-    ) -> bool {
-        if !self.component_can_translate(material, component, in_component, dx, dy) {
-            return false;
-        }
-        self.translate_structural_component(material, component, in_component, dx, dy);
-        true
-    }
-
-    fn shatter_glass_component(&mut self, component: &[usize]) {
-        for &i in component {
-            self.grid[i] = BrokenGlass;
-            self.life[i] = 0;
-            self.vx[i] = 0;
-            self.vy[i] = 0;
-            self.vy_frac[i] = 0;
-            self.y_frac[i] = 0;
-            self.moved_tick[i] = self.tick;
-            self.activate_idx(i);
-        }
-    }
-
-    /// Move unsupported connected structural islands down one cell. Glass turns
-    /// into broken glass when an island that fell on the previous tick hits support.
-    pub(super) fn step_structural_components(&mut self) {
-        let mut stack = std::mem::take(&mut self.structural_stack);
-        stack.clear();
-        let mut component = std::mem::take(&mut self.structural_component);
-        component.clear();
-        let mut in_component = std::mem::take(&mut self.structural_membership);
-        in_component.fill(false);
-
-        for material in [Wood, Stone, Glass] {
-            self.structural_generation = self.structural_generation.wrapping_add(1);
-            if self.structural_generation == 0 {
-                self.structural_seen.fill(0);
-                self.structural_generation = 1;
-            }
-            let generation = self.structural_generation;
-            for y in (0..self.height).rev() {
-                for x in 0..self.width {
-                    let start = self.idx(x, y);
-                    if self.grid[start] != material
-                        || self.moved_tick[start] == self.tick
-                        || self.structural_seen[start] == generation
-                    {
-                        continue;
-                    }
-
-                    stack.clear();
-                    component.clear();
-                    stack.push(start);
-                    self.structural_seen[start] = generation;
-                    while let Some(i) = stack.pop() {
-                        component.push(i);
-                        let cx = i % self.width;
-                        let cy = i / self.width;
-                        for n in self.n4(cx, cy) {
-                            let Some((nx, ny)) = n else { continue };
-                            let ni = self.idx(nx, ny);
-                            if self.grid[ni] == material
-                                && self.moved_tick[ni] != self.tick
-                                && self.structural_seen[ni] != generation
-                            {
-                                self.structural_seen[ni] = generation;
-                                stack.push(ni);
-                            }
-                        }
-                    }
-
-                    for &i in &component {
-                        in_component[i] = true;
-                    }
-                    let unsupported = component.iter().all(|&i| {
-                        let y = i / self.width;
-                        y + 1 < self.height && {
-                            let below = i + self.width;
-                            in_component[below]
-                                || self.structural_can_displace(material, self.grid[below])
-                        }
-                    });
-
-                    if unsupported {
-                        let _ = self.try_translate_structural_component(
-                            material,
-                            &component,
-                            &in_component,
-                            0,
-                            1,
-                        );
-                    } else if material == Glass
-                        && component.iter().any(|&i| {
-                            // u64::MAX is the never-moved sentinel; at tick 0 it
-                            // collides with wrapping_sub(1), so exclude it.
-                            let mt = self.moved_tick[i];
-                            mt != u64::MAX && mt == self.tick.wrapping_sub(1)
-                        })
-                    {
-                        self.shatter_glass_component(&component);
-                    }
-                    for &i in &component {
-                        in_component[i] = false;
-                    }
-                }
-            }
-        }
-
-        stack.clear();
-        component.clear();
-        in_component.fill(false);
-        self.structural_stack = stack;
-        self.structural_component = component;
-        self.structural_membership = in_component;
     }
 
     // --- the step ---
@@ -1404,6 +959,27 @@ mod tests {
         assert_eq!(world.get(1, 1), Wood);
         assert_eq!(world.velocity_at(1, 1), (2, 3));
         assert_eq!((world.vy_frac[target], world.y_frac[target]), (1, 2));
+    }
+
+    #[test]
+    fn structural_translation_preserves_displaced_columns() {
+        let mut world = World::new(4, 3);
+        world.paint(1, 0, Wood);
+        world.paint(2, 0, Wood);
+        world.paint(1, 1, Water);
+        world.paint(2, 1, Oil);
+        let left = world.idx(1, 0);
+        let right = world.idx(2, 0);
+        let mut membership = vec![false; world.width * world.height];
+        membership[left] = true;
+        membership[right] = true;
+
+        world.translate_structural_component(Wood, &[left, right], &membership, 0, 1);
+
+        assert_eq!(world.get(1, 0), Water);
+        assert_eq!(world.get(2, 0), Oil);
+        assert_eq!(world.get(1, 1), Wood);
+        assert_eq!(world.get(2, 1), Wood);
     }
 
     // --- Phase B velocity-driven movement tests ---

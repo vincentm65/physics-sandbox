@@ -419,6 +419,52 @@ impl AtmosOverlay {
     }
 }
 
+/// Viewport/camera state.
+#[derive(Debug)]
+pub struct ViewportState {
+    /// 1× shows the whole world; 2× enlarges each cell.
+    pub zoom: u8,
+    /// View origin used while zoomed in.
+    pub camera: (i32, i32),
+    /// Screen position and view origin captured for a middle-button pan.
+    pub pan_start: Option<((u16, u16), (i32, i32))>,
+}
+
+impl Default for ViewportState {
+    fn default() -> Self {
+        Self {
+            zoom: 1,
+            camera: (0, 0),
+            pan_start: None,
+        }
+    }
+}
+
+/// Material/tool picker overlay state.
+#[derive(Debug, Default)]
+pub struct PickerState {
+    /// Material picker overlay open?
+    pub picker_open: bool,
+    /// Highlighted row in the picker (index into `Material::ALL`).
+    pub picker_cursor: usize,
+    /// Incremental type-ahead filter for the material picker.
+    pub picker_query: String,
+    /// Tool picker overlay state.
+    pub tool_picker_open: bool,
+    pub tool_picker_cursor: usize,
+}
+
+/// Status bar and confirmation dialog state.
+#[derive(Debug, Default)]
+pub struct StatusState {
+    /// Transient status message shown in the UI.
+    pub status_msg: Option<String>,
+    /// Countdown ticks for status message auto-clear (~60 ticks = 1 s).
+    pub status_ticks: u32,
+    /// Pending confirmation dialog (None = no confirmation).
+    pub confirm: Confirm,
+}
+
 /// Editable interaction state.
 #[derive(Debug)]
 pub struct App {
@@ -435,15 +481,7 @@ pub struct App {
     pub last_mouse: Option<(i32, i32)>,
     /// True between a press and its release — drives drag painting.
     pub drawing: bool,
-    /// Material picker overlay open?
-    pub picker_open: bool,
-    /// Highlighted row in the picker (index into `Material::ALL`).
-    pub picker_cursor: usize,
-    /// Incremental type-ahead filter for the material picker.
-    pub picker_query: String,
-    /// Tool picker overlay state.
-    pub tool_picker_open: bool,
-    pub tool_picker_cursor: usize,
+    pub picker: PickerState,
     /// Currently loaded built-in scene, used by reset.
     pub scene: Scene,
     /// Name of the currently loaded built-in or user scene.
@@ -453,12 +491,7 @@ pub struct App {
     /// Drag endpoints for shape placement and preview.
     pub editor_start: Option<(i32, i32)>,
     pub editor_end: Option<(i32, i32)>,
-    /// 1× shows the whole world; 2× enlarges each cell.
-    pub zoom: u8,
-    /// View origin used while zoomed in.
-    pub camera: (i32, i32),
-    /// Screen position and view origin captured for a middle-button pan.
-    pub pan_start: Option<((u16, u16), (i32, i32))>,
+    pub viewport: ViewportState,
     /// Optional selection in inclusive world coordinates.
     pub selection: Option<((i32, i32), (i32, i32))>,
     /// Copied cells, including material lifetime, seed, and temperature.
@@ -475,12 +508,7 @@ pub struct App {
     pub scene_menu: SceneMenu,
     /// Whether the world has unsaved changes.
     pub dirty: bool,
-    /// Transient status message shown in the UI.
-    pub status_msg: Option<String>,
-    /// Countdown ticks for status message auto-clear (~60 ticks = 1 s).
-    pub status_ticks: u32,
-    /// Pending confirmation dialog (None = no confirmation).
-    pub confirm: Confirm,
+    pub status: StatusState,
     pub(crate) line_preview_cache: RefCell<LinePreviewCache>,
     /// Compressed undo snapshots.
     pub undo_stack: Vec<UndoState>,
@@ -502,20 +530,14 @@ impl Default for App {
             quit: false,
             last_mouse: None,
             drawing: false,
-            picker_open: false,
-            picker_cursor: 0,
-            picker_query: String::new(),
-            tool_picker_open: false,
-            tool_picker_cursor: 0,
+            picker: PickerState::default(),
             scene: Scene::House,
             scene_name: Scene::House.name().to_string(),
             tool: EditorTool::default(),
             editor_start: None,
             editor_end: None,
             scene_menu: SceneMenu::default(),
-            zoom: 1,
-            camera: (0, 0),
-            pan_start: None,
+            viewport: ViewportState::default(),
             selection: None,
             clipboard: Vec::new(),
             clipboard_size: (0, 0),
@@ -524,9 +546,7 @@ impl Default for App {
             mouse_world: None,
             mirror: None,
             dirty: false,
-            status_msg: None,
-            status_ticks: 0,
-            confirm: Confirm::None,
+            status: StatusState::default(),
             line_preview_cache: RefCell::new(LinePreviewCache::default()),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -556,10 +576,10 @@ impl App {
 
     /// Age and clear expired status messages.  Call once per frame.
     pub fn tick_status(&mut self) {
-        if self.status_ticks > 0 {
-            self.status_ticks -= 1;
-            if self.status_ticks == 0 {
-                self.status_msg = None;
+        if self.status.status_ticks > 0 {
+            self.status.status_ticks -= 1;
+            if self.status.status_ticks == 0 {
+                self.status.status_msg = None;
             }
         }
     }
@@ -567,8 +587,8 @@ impl App {
     /// Set a transient status message (auto-clears after ~2 seconds).
     pub fn set_status(&mut self, msg: impl Into<String>, is_error: bool) {
         let prefix = if is_error { "Error: " } else { "OK: " };
-        self.status_msg = Some(format!("{prefix}{}", msg.into()));
-        self.status_ticks = 120; // ~2 s at 60 fps
+        self.status.status_msg = Some(format!("{prefix}{}", msg.into()));
+        self.status.status_ticks = 120; // ~2 s at 60 fps
     }
 
     // ── Snapshot helpers for undo/redo ──────────────────────────────
@@ -589,11 +609,11 @@ impl App {
 
     fn handle_key(&mut self, k: &KeyEvent, world: &mut World) -> bool {
         // ── Confirmation-dialog handler ────────────────────────────
-        if self.confirm != Confirm::None {
+        if self.status.confirm != Confirm::None {
             match k.code {
                 KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
-                    let action = self.confirm;
-                    self.confirm = Confirm::None;
+                    let action = self.status.confirm;
+                    self.status.confirm = Confirm::None;
                     match action {
                         Confirm::Clear => {
                             self.push_undo(world);
@@ -638,7 +658,7 @@ impl App {
                     }
                 }
                 KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
-                    self.confirm = Confirm::None;
+                    self.status.confirm = Confirm::None;
                 }
                 _ => {}
             }
@@ -671,13 +691,13 @@ impl App {
                 self.brush_options_open = false;
                 return true;
             }
-            if self.tool_picker_open {
-                self.tool_picker_open = false;
+            if self.picker.tool_picker_open {
+                self.picker.tool_picker_open = false;
                 return true;
             }
-            if self.picker_open {
-                self.picker_open = false;
-                self.picker_query.clear();
+            if self.picker.picker_open {
+                self.picker.picker_open = false;
+                self.picker.picker_query.clear();
                 return true;
             }
             if self.scene_menu.open {
@@ -703,9 +723,9 @@ impl App {
             }
             // Nothing left to close — quit confirmation.
             if self.dirty {
-                self.confirm = Confirm::QuitDirty;
+                self.status.confirm = Confirm::QuitDirty;
             } else {
-                self.confirm = Confirm::Quit;
+                self.status.confirm = Confirm::Quit;
             }
             return true;
         }
@@ -741,10 +761,10 @@ impl App {
         if self.brush_options_open {
             return self.handle_brush_options_key(k);
         }
-        if self.picker_open {
+        if self.picker.picker_open {
             return self.handle_picker_key(k);
         }
-        if self.tool_picker_open {
+        if self.picker.tool_picker_open {
             return self.handle_tool_picker_key(k);
         }
         if self.scene_menu.open {
@@ -757,10 +777,10 @@ impl App {
             }
             KeyCode::Char(' ') | KeyCode::Char('p') => self.paused = !self.paused,
             KeyCode::Char('c') => {
-                self.confirm = Confirm::Clear;
+                self.status.confirm = Confirm::Clear;
             }
             KeyCode::Char('r') => {
-                self.confirm = Confirm::ResetScene;
+                self.status.confirm = Confirm::ResetScene;
             }
             KeyCode::Char('s') => self.scene_menu.open_menu(),
             KeyCode::Char('b') | KeyCode::Char('B') => {
@@ -786,8 +806,8 @@ impl App {
                     false,
                 );
             }
-            KeyCode::Char('z') => self.zoom = 1,
-            KeyCode::Char('x') => self.zoom = 2,
+            KeyCode::Char('z') => self.viewport.zoom = 1,
+            KeyCode::Char('x') => self.viewport.zoom = 2,
             KeyCode::Char('i') => self.pan(0, -4, world),
             KeyCode::Char('j') => self.pan(-4, 0, world),
             KeyCode::Char('k') => self.pan(0, 4, world),
@@ -857,33 +877,33 @@ impl App {
         let n = Material::ALL.len();
         match k.code {
             KeyCode::Tab | KeyCode::Enter | KeyCode::Char(' ') => {
-                self.selected = Material::ALL[self.picker_cursor];
-                self.picker_open = false;
-                self.picker_query.clear();
+                self.selected = Material::ALL[self.picker.picker_cursor];
+                self.picker.picker_open = false;
+                self.picker.picker_query.clear();
             }
             KeyCode::Esc => {
-                self.picker_open = false;
-                self.picker_query.clear();
+                self.picker.picker_open = false;
+                self.picker.picker_query.clear();
             }
             KeyCode::Up => {
-                self.picker_cursor = (self.picker_cursor + n - 1) % n;
-                self.picker_query.clear();
+                self.picker.picker_cursor = (self.picker.picker_cursor + n - 1) % n;
+                self.picker.picker_query.clear();
             }
             KeyCode::Down => {
-                self.picker_cursor = (self.picker_cursor + 1) % n;
-                self.picker_query.clear();
+                self.picker.picker_cursor = (self.picker.picker_cursor + 1) % n;
+                self.picker.picker_query.clear();
             }
             KeyCode::Home => {
-                self.picker_cursor = 0;
-                self.picker_query.clear();
+                self.picker.picker_cursor = 0;
+                self.picker.picker_query.clear();
             }
             KeyCode::End => {
-                self.picker_cursor = n - 1;
-                self.picker_query.clear();
+                self.picker.picker_cursor = n - 1;
+                self.picker.picker_query.clear();
             }
             KeyCode::Backspace => {
-                self.picker_query.pop();
-                if !self.picker_query.is_empty() {
+                self.picker.picker_query.pop();
+                if !self.picker.picker_query.is_empty() {
                     self.apply_picker_query();
                 }
             }
@@ -892,7 +912,7 @@ impl App {
             // part of the query so names like "C4"/"TNT" work; palette digit
             // shortcuts still work outside the picker.
             KeyCode::Char(c) if c.is_ascii_alphanumeric() || c == ' ' => {
-                self.picker_query.push(c.to_ascii_lowercase());
+                self.picker.picker_query.push(c.to_ascii_lowercase());
                 self.apply_picker_query();
             }
             _ => {}
@@ -904,6 +924,7 @@ impl App {
     /// current type-ahead query (case-insensitive; non-alphanumerics ignored).
     fn apply_picker_query(&mut self) {
         let query: String = self
+            .picker
             .picker_query
             .chars()
             .filter(|c| c.is_ascii_alphanumeric())
@@ -921,7 +942,7 @@ impl App {
                 .collect();
             name.starts_with(&query)
         }) {
-            self.picker_cursor = idx;
+            self.picker.picker_cursor = idx;
         }
     }
 
@@ -929,22 +950,22 @@ impl App {
         let n = EditorTool::ALL.len();
         match k.code {
             KeyCode::Char('e') | KeyCode::Char('E') | KeyCode::Enter | KeyCode::Char(' ') => {
-                self.tool = EditorTool::ALL[self.tool_picker_cursor];
+                self.tool = EditorTool::ALL[self.picker.tool_picker_cursor];
                 if self.tool != EditorTool::Select {
                     self.selection = None;
                 }
-                self.tool_picker_open = false;
+                self.picker.tool_picker_open = false;
                 self.cancel_shape();
             }
-            KeyCode::Esc => self.tool_picker_open = false,
+            KeyCode::Esc => self.picker.tool_picker_open = false,
             KeyCode::Up | KeyCode::Char('w') | KeyCode::Char('k') => {
-                self.tool_picker_cursor = (self.tool_picker_cursor + n - 1) % n;
+                self.picker.tool_picker_cursor = (self.picker.tool_picker_cursor + n - 1) % n;
             }
             KeyCode::Down | KeyCode::Char('s') | KeyCode::Char('j') => {
-                self.tool_picker_cursor = (self.tool_picker_cursor + 1) % n;
+                self.picker.tool_picker_cursor = (self.picker.tool_picker_cursor + 1) % n;
             }
-            KeyCode::Home => self.tool_picker_cursor = 0,
-            KeyCode::End => self.tool_picker_cursor = n - 1,
+            KeyCode::Home => self.picker.tool_picker_cursor = 0,
+            KeyCode::End => self.picker.tool_picker_cursor = n - 1,
             _ => {}
         }
         true
@@ -988,7 +1009,7 @@ impl App {
             }
             KeyCode::Char('d') => {
                 if !self.scene_menu.scenes.is_empty() {
-                    self.confirm = Confirm::SceneDelete;
+                    self.status.confirm = Confirm::SceneDelete;
                 } else {
                     self.set_status("No scene selected", true);
                 }
@@ -1011,7 +1032,7 @@ impl App {
                     self.scene_menu.scenes.get(self.scene_menu.cursor).cloned()
                 {
                     self.scene_menu.save_name = name;
-                    self.confirm = Confirm::SceneOverwrite;
+                    self.status.confirm = Confirm::SceneOverwrite;
                 } else {
                     self.set_status("No scene selected", true);
                 }
@@ -1040,7 +1061,7 @@ impl App {
                 };
                 // Check if overwriting existing scene
                 if self.scene_menu.scenes.contains(&name) {
-                    self.confirm = Confirm::SceneOverwrite;
+                    self.status.confirm = Confirm::SceneOverwrite;
                     return true;
                 }
                 match self.scene_menu.save_scene(world) {
@@ -1065,16 +1086,16 @@ impl App {
     }
 
     fn open_picker(&mut self) {
-        self.picker_open = true;
-        self.picker_query.clear();
+        self.picker.picker_open = true;
+        self.picker.picker_query.clear();
         if let Some(idx) = Material::ALL.iter().position(|&m| m == self.selected) {
-            self.picker_cursor = idx;
+            self.picker.picker_cursor = idx;
         }
     }
 
     fn open_tool_picker(&mut self) {
-        self.tool_picker_open = true;
-        self.tool_picker_cursor = EditorTool::ALL
+        self.picker.tool_picker_open = true;
+        self.picker.tool_picker_cursor = EditorTool::ALL
             .iter()
             .position(|&tool| tool == self.tool)
             .unwrap_or(0);
@@ -1082,10 +1103,10 @@ impl App {
     }
 
     fn handle_mouse(&mut self, me: &MouseEvent, world: &mut World) -> bool {
-        if self.confirm != Confirm::None || self.brush_options_open {
+        if self.status.confirm != Confirm::None || self.brush_options_open {
             return true;
         }
-        if !self.picker_open && !self.scene_menu.open && !self.tool_picker_open {
+        if !self.picker.picker_open && !self.scene_menu.open && !self.picker.tool_picker_open {
             self.mouse_world = Some(self.mouse_to_world(me));
             self.paste_cursor = self.mouse_world;
         }
@@ -1093,12 +1114,12 @@ impl App {
             // Scroll wheel zooms around the cell beneath the cursor.
             // Ctrl+scroll adjusts brush size instead.
             MouseEventKind::ScrollUp => {
-                if self.picker_open {
+                if self.picker.picker_open {
                     let n = Material::ALL.len();
-                    self.picker_cursor = (self.picker_cursor + n - 1) % n;
-                } else if self.tool_picker_open {
+                    self.picker.picker_cursor = (self.picker.picker_cursor + n - 1) % n;
+                } else if self.picker.tool_picker_open {
                     let n = EditorTool::ALL.len();
-                    self.tool_picker_cursor = (self.tool_picker_cursor + n - 1) % n;
+                    self.picker.tool_picker_cursor = (self.picker.tool_picker_cursor + n - 1) % n;
                 } else if self.scene_menu.open {
                     let n = self.scene_menu.scenes.len();
                     if n > 0 {
@@ -1111,11 +1132,12 @@ impl App {
                 }
             }
             MouseEventKind::ScrollDown => {
-                if self.picker_open {
-                    self.picker_cursor = (self.picker_cursor + 1) % Material::ALL.len();
-                } else if self.tool_picker_open {
+                if self.picker.picker_open {
+                    self.picker.picker_cursor =
+                        (self.picker.picker_cursor + 1) % Material::ALL.len();
+                } else if self.picker.tool_picker_open {
                     let n = EditorTool::ALL.len();
-                    self.tool_picker_cursor = (self.tool_picker_cursor + 1) % n;
+                    self.picker.tool_picker_cursor = (self.picker.tool_picker_cursor + 1) % n;
                 } else if self.scene_menu.open {
                     let n = self.scene_menu.scenes.len();
                     if n > 0 {
@@ -1128,16 +1150,18 @@ impl App {
                 }
             }
             MouseEventKind::Down(MouseButton::Middle)
-                if !self.picker_open && !self.scene_menu.open && !self.tool_picker_open =>
+                if !self.picker.picker_open
+                    && !self.scene_menu.open
+                    && !self.picker.tool_picker_open =>
             {
-                self.pan_start = Some(((me.column, me.row), self.camera));
+                self.viewport.pan_start = Some(((me.column, me.row), self.viewport.camera));
             }
             MouseEventKind::Down(MouseButton::Left) => {
-                if self.picker_open {
+                if self.picker.picker_open {
                     self.click_picker(me.column, me.row, world);
                 } else if self.scene_menu.open {
                     self.click_scene_menu(me.column, me.row, world);
-                } else if self.tool_picker_open {
+                } else if self.picker.tool_picker_open {
                     // Tool selection is keyboard-only; do not paint through the modal.
                 } else {
                     let point = self.mouse_to_world(me);
@@ -1161,24 +1185,28 @@ impl App {
                 }
             }
             MouseEventKind::Drag(MouseButton::Left)
-                if !self.picker_open && !self.scene_menu.open && !self.tool_picker_open =>
+                if !self.picker.picker_open
+                    && !self.scene_menu.open
+                    && !self.picker.tool_picker_open =>
             {
                 self.paint_drag(me, world)
             }
             MouseEventKind::Drag(MouseButton::Middle)
-                if !self.picker_open && !self.scene_menu.open && !self.tool_picker_open =>
+                if !self.picker.picker_open
+                    && !self.scene_menu.open
+                    && !self.picker.tool_picker_open =>
             {
                 self.pan_to(me, world)
             }
             MouseEventKind::Moved
-                if !self.picker_open
+                if !self.picker.picker_open
                     && !self.scene_menu.open
-                    && !self.tool_picker_open
+                    && !self.picker.tool_picker_open
                     && self.drawing =>
             {
                 self.paint_drag(me, world)
             }
-            MouseEventKind::Up(MouseButton::Middle) => self.pan_start = None,
+            MouseEventKind::Up(MouseButton::Middle) => self.viewport.pan_start = None,
             MouseEventKind::Up(_) => {
                 if self.drawing && !self.pasting && self.tool == EditorTool::Select {
                     self.selection = self.editor_start.zip(self.editor_end);
@@ -1222,31 +1250,33 @@ impl App {
         self.drawing = false;
     }
     fn mouse_to_world(&self, me: &MouseEvent) -> (i32, i32) {
-        if self.zoom == 2 {
+        if self.viewport.zoom == 2 {
             (
-                self.camera.0 + me.column as i32 / 2,
-                self.camera.1 + me.row as i32,
+                self.viewport.camera.0 + me.column as i32 / 2,
+                self.viewport.camera.1 + me.row as i32,
             )
         } else {
             (
-                self.camera.0 + me.column as i32,
-                self.camera.1 + me.row as i32 * 2,
+                self.viewport.camera.0 + me.column as i32,
+                self.viewport.camera.1 + me.row as i32 * 2,
             )
         }
     }
 
     fn pan(&mut self, dx: i32, dy: i32, world: &World) {
-        self.camera.0 = (self.camera.0 + dx).max(0);
-        self.camera.1 = (self.camera.1 + dy).max(0);
+        self.viewport.camera.0 = (self.viewport.camera.0 + dx).max(0);
+        self.viewport.camera.1 = (self.viewport.camera.1 + dy).max(0);
         self.clamp_camera(world);
     }
 
     fn clamp_camera(&mut self, world: &World) {
-        self.camera.0 = self
+        self.viewport.camera.0 = self
+            .viewport
             .camera
             .0
             .min((world.width as i32).saturating_sub(1).max(0));
-        self.camera.1 = self
+        self.viewport.camera.1 = self
+            .viewport
             .camera
             .1
             .min((world.height as i32).saturating_sub(1).max(0));
@@ -1254,25 +1284,25 @@ impl App {
 
     fn set_zoom_at(&mut self, me: &MouseEvent, zoom: u8, world: &World) {
         let point = self.mouse_to_world(me);
-        self.zoom = zoom;
-        self.camera = if zoom == 2 {
+        self.viewport.zoom = zoom;
+        self.viewport.camera = if zoom == 2 {
             (point.0 - me.column as i32 / 2, point.1 - me.row as i32)
         } else {
             (point.0 - me.column as i32, point.1 - me.row as i32 * 2)
         };
-        self.camera.0 = self.camera.0.max(0);
-        self.camera.1 = self.camera.1.max(0);
+        self.viewport.camera.0 = self.viewport.camera.0.max(0);
+        self.viewport.camera.1 = self.viewport.camera.1.max(0);
         self.clamp_camera(world);
     }
 
     fn pan_to(&mut self, me: &MouseEvent, world: &World) {
-        let Some(((start_x, start_y), origin)) = self.pan_start else {
+        let Some(((start_x, start_y), origin)) = self.viewport.pan_start else {
             return;
         };
-        let scale_x = if self.zoom == 2 { 2 } else { 1 };
-        let scale_y = if self.zoom == 2 { 1 } else { 2 };
-        self.camera.0 = (origin.0 - (me.column as i32 - start_x as i32) / scale_x).max(0);
-        self.camera.1 = (origin.1 - (me.row as i32 - start_y as i32) * scale_y).max(0);
+        let scale_x = if self.viewport.zoom == 2 { 2 } else { 1 };
+        let scale_y = if self.viewport.zoom == 2 { 1 } else { 2 };
+        self.viewport.camera.0 = (origin.0 - (me.column as i32 - start_x as i32) / scale_x).max(0);
+        self.viewport.camera.1 = (origin.1 - (me.row as i32 - start_y as i32) * scale_y).max(0);
         self.clamp_camera(world);
     }
 
@@ -1483,10 +1513,10 @@ impl App {
         if self.tool != EditorTool::Brush
             || self.pasting
             || self.brush_options_open
-            || self.picker_open
-            || self.tool_picker_open
+            || self.picker.picker_open
+            || self.picker.tool_picker_open
             || self.scene_menu.open
-            || self.confirm != Confirm::None
+            || self.status.confirm != Confirm::None
         {
             return false;
         }
@@ -1593,17 +1623,17 @@ impl App {
             && row < area.y + area.height.saturating_sub(1)
         {
             let visible = area.height.saturating_sub(2) as usize;
-            let offset = ui::picker_scroll_offset(self.picker_cursor, area.height);
+            let offset = ui::picker_scroll_offset(self.picker.picker_cursor, area.height);
             let r = offset + (row - area.y).saturating_sub(1) as usize;
             if r < Material::ALL.len() && r < offset + visible {
-                self.picker_cursor = r;
+                self.picker.picker_cursor = r;
                 self.selected = Material::ALL[r];
-                self.picker_open = false;
-                self.picker_query.clear();
+                self.picker.picker_open = false;
+                self.picker.picker_query.clear();
             }
         } else {
-            self.picker_open = false;
-            self.picker_query.clear();
+            self.picker.picker_open = false;
+            self.picker.picker_query.clear();
         }
     }
 
@@ -1762,8 +1792,10 @@ mod tests {
     #[test]
     fn picker_typeahead_jumps_to_matching_material() {
         let mut app = App {
-            picker_open: true,
-            picker_cursor: 0,
+            picker: PickerState {
+                picker_open: true,
+                ..PickerState::default()
+            },
             ..App::default()
         };
         let mut world = World::new(4, 4);
@@ -1777,41 +1809,44 @@ mod tests {
 
         type_char(&mut app, &mut world, 's');
         type_char(&mut app, &mut world, 'a');
-        assert_eq!(Material::ALL[app.picker_cursor], Material::Sand);
-        assert_eq!(app.picker_query, "sa");
-        assert!(app.picker_open);
+        assert_eq!(Material::ALL[app.picker.picker_cursor], Material::Sand);
+        assert_eq!(app.picker.picker_query, "sa");
+        assert!(app.picker.picker_open);
 
         type_char(&mut app, &mut world, 'l');
         // "sal" matches Salt (Sand no longer matches the longer prefix).
-        assert_eq!(Material::ALL[app.picker_cursor], Material::Salt);
+        assert_eq!(Material::ALL[app.picker.picker_cursor], Material::Salt);
 
-        app.picker_query.clear();
+        app.picker.picker_query.clear();
         type_char(&mut app, &mut world, 'g');
         type_char(&mut app, &mut world, 'l');
         type_char(&mut app, &mut world, 'a');
-        assert_eq!(Material::ALL[app.picker_cursor], Material::Glass);
+        assert_eq!(Material::ALL[app.picker.picker_cursor], Material::Glass);
 
-        app.picker_query.clear();
+        app.picker.picker_query.clear();
         type_char(&mut app, &mut world, 'c');
         type_char(&mut app, &mut world, '4');
-        assert_eq!(Material::ALL[app.picker_cursor], Material::C4);
-        assert_eq!(app.picker_query, "c4");
-        assert!(app.picker_open);
+        assert_eq!(Material::ALL[app.picker.picker_cursor], Material::C4);
+        assert_eq!(app.picker.picker_query, "c4");
+        assert!(app.picker.picker_open);
 
         // Enter still confirms the selection.
         app.handle(
             &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             &mut world,
         );
-        assert!(!app.picker_open);
+        assert!(!app.picker.picker_open);
         assert_eq!(app.selected, Material::C4);
-        assert!(app.picker_query.is_empty());
+        assert!(app.picker.picker_query.is_empty());
     }
 
     #[test]
     fn confirmation_blocks_mouse_painting() {
         let mut app = App {
-            confirm: Confirm::Clear,
+            status: StatusState {
+                confirm: Confirm::Clear,
+                ..StatusState::default()
+            },
             ..App::default()
         };
         let mut world = World::new(10, 10);
@@ -1825,7 +1860,10 @@ mod tests {
     #[test]
     fn tool_picker_blocks_mouse_painting() {
         let mut app = App {
-            tool_picker_open: true,
+            picker: PickerState {
+                tool_picker_open: true,
+                ..PickerState::default()
+            },
             ..App::default()
         };
         let mut world = World::new(10, 10);

@@ -94,6 +94,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn heat_diffusion_is_symmetric_and_stays_within_initial_bounds() {
+        let mut world = World::new(3, 3);
+        let center = world.idx(1, 1);
+        world.temp[center] = 500;
+        world.active_chunks.fill(true);
+
+        world.step_heat();
+
+        let neighbors = [
+            world.temp[world.idx(1, 0)],
+            world.temp[world.idx(0, 1)],
+            world.temp[world.idx(2, 1)],
+            world.temp[world.idx(1, 2)],
+        ];
+        assert!(neighbors.iter().all(|&temp| temp == neighbors[0]));
+        assert!(neighbors[0] > AMBIENT_TEMP);
+        assert!(world.temp[center] < 500);
+        assert!(
+            world
+                .temp
+                .iter()
+                .all(|&temp| (AMBIENT_TEMP..=500).contains(&temp))
+        );
+    }
+
+    #[test]
+    fn heat_sources_remain_clamped_during_diffusion() {
+        let mut world = World::new(3, 3);
+        world.paint(1, 1, Lava);
+        world.temp.fill(-100);
+        world.active_chunks.fill(true);
+
+        world.step_heat();
+
+        assert_eq!(
+            world.temp[world.idx(1, 1)],
+            Lava.heat_source_temp().unwrap()
+        );
+    }
+
+    #[test]
     fn near_ambient_temperature_converges_instead_of_stalling() {
         let mut world = World::new(1, 1);
         world.temp[0] = AMBIENT_TEMP + 1;

@@ -32,17 +32,17 @@ pub fn draw(frame: &mut Frame, world: &World, app: &App) {
     if app.brush_options_open {
         draw_brush_options(frame, &area, app);
     }
-    if app.tool_picker_open {
+    if app.picker.tool_picker_open {
         draw_tool_picker(frame, &area, app);
     }
-    if app.picker_open {
+    if app.picker.picker_open {
         draw_picker(frame, &area, app);
     }
     if app.scene_menu.open {
         draw_scene_menu(frame, &area, app);
     }
     // Confirmation dialog drawn last (on top).
-    if app.confirm != Confirm::None {
+    if app.status.confirm != Confirm::None {
         draw_confirmation(frame, &area, app);
     }
 }
@@ -147,17 +147,17 @@ fn draw_grid(frame: &mut Frame, world: &World, app: &App, area: &Rect) {
     };
     for cy in 0..grid_rows {
         for cx in 0..area.width as usize {
-            let (wx, top_y, bottom_y) = if app.zoom == 2 {
+            let (wx, top_y, bottom_y) = if app.viewport.zoom == 2 {
                 (
-                    app.camera.0 + (cx / 2) as i32,
-                    app.camera.1 + cy as i32,
+                    app.viewport.camera.0 + (cx / 2) as i32,
+                    app.viewport.camera.1 + cy as i32,
                     None,
                 )
             } else {
                 (
-                    app.camera.0 + cx as i32,
-                    app.camera.1 + (cy * 2) as i32,
-                    Some(app.camera.1 + (cy * 2 + 1) as i32),
+                    app.viewport.camera.0 + cx as i32,
+                    app.viewport.camera.1 + (cy * 2) as i32,
+                    Some(app.viewport.camera.1 + (cy * 2 + 1) as i32),
                 )
             };
             let cell = buf.cell_mut((area.x + cx as u16, area.y + cy as u16));
@@ -208,7 +208,7 @@ fn draw_grid(frame: &mut Frame, world: &World, app: &App, area: &Rect) {
                     || (app.tool != EditorTool::Select && shape_preview_contains(wx, y))
             });
             if selected {
-                if app.zoom == 2 {
+                if app.viewport.zoom == 2 {
                     cell.set_bg(preview_color);
                 } else {
                     cell.set_fg(preview_color);
@@ -225,7 +225,7 @@ fn draw_grid(frame: &mut Frame, world: &World, app: &App, area: &Rect) {
                     || (app.tool == EditorTool::Select && shape_preview_contains(wx, y))
             });
             if selection_top {
-                if app.zoom == 2 {
+                if app.viewport.zoom == 2 {
                     cell.set_bg(Color::White);
                 } else {
                     cell.set_fg(Color::White);
@@ -307,7 +307,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: &Rect, status_rows: u16) {
     let base_y = area.y + area.height - status_rows;
 
     // Status message takes priority if active.
-    if let Some(msg) = &app.status_msg {
+    if let Some(msg) = &app.status.status_msg {
         let msg_color = if msg.starts_with("Error: ") {
             Color::Rgb(255, 120, 100)
         } else {
@@ -476,7 +476,7 @@ fn draw_tool_picker(frame: &mut Frame, area: &Rect, app: &App) {
     let accent = Color::Rgb(255, 220, 120);
     for (index, tool) in EditorTool::ALL.iter().enumerate() {
         let y = popup.y + 1 + index as u16;
-        let selected = index == app.tool_picker_cursor;
+        let selected = index == app.picker.tool_picker_cursor;
         for x in popup.x + 1..popup.x + popup.width.saturating_sub(1) {
             if let Some(cell) = buf.cell_mut((x, y)) {
                 cell.set_bg(if selected { hi_bg } else { base_bg });
@@ -539,12 +539,12 @@ fn draw_picker(frame: &mut Frame, area: &Rect, app: &App) {
     // wipe anything behind, then draw the framed panel — do this before the
     // mutable buffer borrow below.
     frame.render_widget(Clear, popup);
-    let title = if app.picker_query.is_empty() {
+    let title = if app.picker.picker_query.is_empty() {
         " Materials — type to find, Enter pick, Esc close ".to_string()
     } else {
         format!(
             " Materials — \"{}\" · Enter pick, Esc close ",
-            app.picker_query
+            app.picker.picker_query
         )
     };
     let block = Block::default().borders(Borders::ALL).title(title).style(
@@ -565,7 +565,7 @@ fn draw_picker(frame: &mut Frame, area: &Rect, app: &App) {
     let inner_w = popup.width.saturating_sub(2);
 
     let visible = popup.height.saturating_sub(2) as usize;
-    let offset = picker_scroll_offset(app.picker_cursor, popup.height);
+    let offset = picker_scroll_offset(app.picker.picker_cursor, popup.height);
     for (row, (i, &m)) in Material::ALL
         .iter()
         .enumerate()
@@ -574,7 +574,7 @@ fn draw_picker(frame: &mut Frame, area: &Rect, app: &App) {
         .enumerate()
     {
         let y = popup.y + 1 + row as u16;
-        let selected = i == app.picker_cursor;
+        let selected = i == app.picker.picker_cursor;
 
         // row background
         for dx in 0..inner_w {
@@ -903,7 +903,7 @@ fn draw_save_dialog(buf: &mut Buffer, popup: Rect, app: &App) {
 
 /// Draw the confirmation dialog over the centre of the terminal.
 fn draw_confirmation(frame: &mut Frame, area: &Rect, app: &App) {
-    let text = app.confirm.prompt();
+    let text = app.status.confirm.prompt();
     let w = text.len() as u16 + 4;
     let h: u16 = 3;
     let w = w.min(area.width.saturating_sub(4));

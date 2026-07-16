@@ -25,7 +25,7 @@ impl World {
                 Water => self.put(ni, Ice, 0),
                 Fire | Ember | Lava => {
                     self.put(ni, if self.grid[ni] == Lava { Stone } else { Smoke }, 0);
-                    self.put(i, Steam, rand_range(STEAM_LIFE_MIN, STEAM_LIFE_MAX));
+                    self.put_rand_range(i, Steam, STEAM_LIFE_MIN, STEAM_LIFE_MAX);
                     return true;
                 }
                 // Hot glass meets cryogenic quench → shatter.
@@ -58,7 +58,7 @@ impl World {
             let ni = self.idx(nx, ny);
             match self.grid[ni] {
                 Water => {
-                    self.put(ni, Steam, rand_range(STEAM_LIFE_MIN, STEAM_LIFE_MAX));
+                    self.put_rand_range(ni, Steam, STEAM_LIFE_MIN, STEAM_LIFE_MAX);
                     solidified = true;
                 }
                 // Sand/shards already softened by heat can be absorbed into the flow.
@@ -209,7 +209,7 @@ impl World {
             // converts within a few dozen ticks even after ambient bleed.
             let chance = (((heat as u32) - 100).min(500) / 2 + 150).min(600);
             if self.chance(x, y, 0x83, chance) {
-                self.put(i, Steam, rand_range(STEAM_LIFE_MIN, STEAM_LIFE_MAX));
+                self.put_rand_range(i, Steam, STEAM_LIFE_MIN, STEAM_LIFE_MAX);
                 return true;
             }
         }
@@ -229,12 +229,12 @@ impl World {
                     if oily && !self.chance(nx, ny, 0x82, 100) {
                         continue;
                     }
-                    self.put(i, Steam, rand_range(STEAM_LIFE_MIN, STEAM_LIFE_MAX));
+                    self.put_rand_range(i, Steam, STEAM_LIFE_MIN, STEAM_LIFE_MAX);
                     return true;
                 }
                 Lava => {
                     // water side of lava+water: boil; lava solidifies when it steps
-                    self.put(i, Steam, rand_range(STEAM_LIFE_MIN, STEAM_LIFE_MAX));
+                    self.put_rand_range(i, Steam, STEAM_LIFE_MIN, STEAM_LIFE_MAX);
                     return true;
                 }
                 _ => {}

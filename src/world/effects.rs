@@ -50,13 +50,9 @@ impl World {
             if material.is_empty() || material.is_gas() {
                 // Soft fill at the core so blasts leave a brief fireball.
                 if dist2 == 0 || (strength > 550 && self.roll(tx, ty, 0x92) < 350) {
-                    self.put(i, Fire, rand_range(FIRE_LIFE_MIN / 2, FIRE_LIFE_MAX / 2));
+                    self.put_rand_range(i, Fire, FIRE_LIFE_MIN / 2, FIRE_LIFE_MAX / 2);
                 } else if strength > 300 && self.roll(tx, ty, 0x93) < 250 {
-                    self.put(
-                        i,
-                        Smoke,
-                        rand_range(SMOKE_LIFE_MIN / 3, SMOKE_LIFE_MAX / 3),
-                    );
+                    self.put_rand_range(i, Smoke, SMOKE_LIFE_MIN / 3, SMOKE_LIFE_MAX / 3);
                 }
                 if impulse > 0 {
                     self.apply_blast_impulse(i, dx, dy, impulse);
@@ -84,15 +80,11 @@ impl World {
                 if strength > 700 {
                     let roll = self.roll(tx, ty, 0x94);
                     if roll < 400 {
-                        self.put(i, Fire, rand_range(FIRE_LIFE_MIN / 2, FIRE_LIFE_MAX / 2));
+                        self.put_rand_range(i, Fire, FIRE_LIFE_MIN / 2, FIRE_LIFE_MAX / 2);
                         self.activate_next(tx, ty);
                         continue;
                     } else if roll < 700 {
-                        self.put(
-                            i,
-                            Smoke,
-                            rand_range(SMOKE_LIFE_MIN / 3, SMOKE_LIFE_MAX / 3),
-                        );
+                        self.put_rand_range(i, Smoke, SMOKE_LIFE_MIN / 3, SMOKE_LIFE_MAX / 3);
                         self.activate_next(tx, ty);
                         continue;
                     } else if strength > 850 {
@@ -112,13 +104,9 @@ impl World {
             if damage >= 8 {
                 let roll = self.roll(tx, ty, 0x95);
                 if roll < 500 {
-                    self.put(i, Fire, rand_range(FIRE_LIFE_MIN / 2, FIRE_LIFE_MAX / 2));
+                    self.put_rand_range(i, Fire, FIRE_LIFE_MIN / 2, FIRE_LIFE_MAX / 2);
                 } else if roll < 800 {
-                    self.put(
-                        i,
-                        Smoke,
-                        rand_range(SMOKE_LIFE_MIN / 3, SMOKE_LIFE_MAX / 3),
-                    );
+                    self.put_rand_range(i, Smoke, SMOKE_LIFE_MIN / 3, SMOKE_LIFE_MAX / 3);
                 } else {
                     self.put(i, Empty, 0);
                 }
@@ -165,20 +153,30 @@ impl World {
             }
 
             let e2 = err * 2;
-            let mut stepped = false;
-            if e2 > -dy {
+            let step_x = e2 > -dy;
+            let step_y = e2 < dx;
+
+            // A diagonal ray crosses both cells touching the corner. Treat either
+            // as an occluder instead of allowing blast energy through a crack.
+            if step_x && step_y {
+                for (cx, cy) in [(x + sx, y), (x, y + sy)] {
+                    if (cx != x1 || cy != y1)
+                        && self.blast_blocks_wave(self.grid[self.idx(cx as usize, cy as usize)])
+                    {
+                        return false;
+                    }
+                }
+            }
+
+            if step_x {
                 err -= dy;
                 x += sx;
-                stepped = true;
             }
-            if e2 < dx {
-                // When both axes advance on the same iteration the diagonal
-                // corner cell is also checked by the next loop body.
+            if step_y {
                 err += dx;
                 y += sy;
-                stepped = true;
             }
-            if !stepped {
+            if !step_x && !step_y {
                 return false;
             }
         }
@@ -211,7 +209,7 @@ impl World {
         }
 
         let product = material.blast_break_product().unwrap_or(Empty);
-        let life = rand_life(product);
+        let life = self.rand_life(product);
         self.put(i, product, life);
         true
     }
@@ -283,7 +281,7 @@ impl World {
         if self.life[i] < delay {
             return false;
         }
-        let life = rand_life(product);
+        let life = self.rand_life(product);
         self.put(i, product, life);
         true
     }
@@ -319,7 +317,7 @@ impl World {
         if self.life[i] != 0 {
             return;
         }
-        self.put(i, Fire, rand_range(FIRE_LIFE_MIN, FIRE_LIFE_MAX));
+        self.put_rand_range(i, Fire, FIRE_LIFE_MIN, FIRE_LIFE_MAX);
         for n in self.n8(x, y) {
             let Some((nx, ny)) = n else {
                 continue;
@@ -756,7 +754,7 @@ impl World {
                 has_air |= matches!(other, Empty | Smoke | Steam | Fire) || other.flammable();
             }
             if !has_air {
-                self.put(i, Smoke, rand_range(SMOKE_LIFE_MIN / 2, SMOKE_LIFE_MAX / 2));
+                self.put_rand_range(i, Smoke, SMOKE_LIFE_MIN / 2, SMOKE_LIFE_MAX / 2);
                 return;
             }
         }
@@ -779,7 +777,7 @@ impl World {
 
         // Oil/napalm fires shrug off water: water boils away, flame keeps burning.
         for &ni in &water[..water_len] {
-            self.put(ni, Steam, rand_range(STEAM_LIFE_MIN, STEAM_LIFE_MAX));
+            self.put_rand_range(ni, Steam, STEAM_LIFE_MIN, STEAM_LIFE_MAX);
             if !oily {
                 extinguished = true;
             }
@@ -789,7 +787,7 @@ impl World {
         if extinguished {
             // The adjacent water already became steam. Turning the flame into
             // steam too would create an extra water cell when both condense.
-            self.put(i, Smoke, rand_range(SMOKE_LIFE_MIN / 2, SMOKE_LIFE_MAX / 2));
+            self.put_rand_range(i, Smoke, SMOKE_LIFE_MIN / 2, SMOKE_LIFE_MAX / 2);
             return;
         }
 
@@ -808,7 +806,7 @@ impl World {
         {
             let ui = self.idx(ux, uy);
             if self.grid[ui] == Empty {
-                self.put(ui, Smoke, rand_range(SMOKE_LIFE_MIN, SMOKE_LIFE_MAX));
+                self.put_rand_range(ui, Smoke, SMOKE_LIFE_MIN, SMOKE_LIFE_MAX);
             }
         }
 
@@ -868,16 +866,16 @@ impl World {
             let ni = self.idx(nx, ny);
             match self.grid[ni] {
                 Water => {
-                    self.put(ni, Steam, rand_range(STEAM_LIFE_MIN, STEAM_LIFE_MAX));
+                    self.put_rand_range(ni, Steam, STEAM_LIFE_MIN, STEAM_LIFE_MAX);
                     quenched = true;
                 }
                 Empty | Smoke if ny < y => {
                     // Flames can lick upward through smoke; smoke wisps are less common.
                     let r = self.roll(nx, ny, 0x53);
                     if r < 80 {
-                        self.put(ni, Fire, rand_range(FIRE_LIFE_MIN, FIRE_LIFE_MAX));
+                        self.put_rand_range(ni, Fire, FIRE_LIFE_MIN, FIRE_LIFE_MAX);
                     } else if r < 100 {
-                        self.put(ni, Smoke, rand_range(SMOKE_LIFE_MIN, SMOKE_LIFE_MAX));
+                        self.put_rand_range(ni, Smoke, SMOKE_LIFE_MIN, SMOKE_LIFE_MAX);
                     }
                 }
                 _ => {}
@@ -999,5 +997,48 @@ mod tests {
             still_on_ledge > 0,
             "napalm should remain on the solid ledge"
         );
+    }
+
+    #[test]
+    fn blast_line_of_sight_excludes_target_but_blocks_cells_behind_it() {
+        let mut world = World::new(5, 1);
+        world.paint(2, 0, Metal);
+
+        assert!(world.blast_has_line_of_sight(0, 0, 2, 0));
+        assert!(!world.blast_has_line_of_sight(0, 0, 4, 0));
+    }
+
+    #[test]
+    fn blast_line_of_sight_cannot_pass_through_diagonal_corner() {
+        let mut world = World::new(3, 3);
+        world.paint(1, 0, Metal);
+
+        assert!(!world.blast_has_line_of_sight(0, 0, 2, 2));
+    }
+
+    /// Two worlds initialised with the same seed must produce identical state
+    /// after the same number of steps, confirming deterministic reproducibility.
+    #[test]
+    fn same_seed_produces_identical_simulation() {
+        const STEPS: usize = 100;
+        let mut a = World::with_seed(32, 24, 12345);
+        let mut b = World::with_seed(32, 24, 12345);
+
+        for _ in 0..STEPS {
+            a.step();
+            b.step();
+        }
+
+        // Compare every cell.
+        for y in 0..a.height {
+            for x in 0..a.width {
+                let ia = a.idx(x, y);
+                let ib = b.idx(x, y);
+                assert_eq!(a.grid[ia], b.grid[ib], "cell ({x},{y}) material mismatch");
+                assert_eq!(a.life[ia], b.life[ib], "cell ({x},{y}) life mismatch");
+                assert_eq!(a.seed[ia], b.seed[ib], "cell ({x},{y}) seed mismatch");
+                assert_eq!(a.temp[ia], b.temp[ib], "cell ({x},{y}) temp mismatch");
+            }
+        }
     }
 }

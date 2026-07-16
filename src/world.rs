@@ -1,5 +1,3 @@
-use rand::Rng;
-
 use crate::material::{AMBIENT_TEMP, Material};
 use Material::*;
 
@@ -7,10 +5,47 @@ mod atmosphere;
 mod core;
 mod effects;
 mod heat;
+mod movement;
 mod reactions;
 mod scenes;
+mod structural;
 
 pub use core::{Scene, World};
+
+// Types used by sibling modules.
+/// Simple deterministic 64-bit xorshift* PRNG used by the simulation.
+/// Generates deterministic values from a seedable state.
+#[derive(Clone)]
+pub(crate) struct Prng {
+    state: u64,
+}
+
+impl Prng {
+    pub fn new(seed: u64) -> Self {
+        // Avoid the all-zero state (xorshift* would lock up).
+        Self {
+            state: if seed == 0 { 1 } else { seed },
+        }
+    }
+
+    pub fn next_u64(&mut self) -> u64 {
+        let mut x = self.state;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.state = x;
+        x.wrapping_mul(0x2545_F491_4F6C_CD1D)
+    }
+
+    pub fn next_u8(&mut self) -> u8 {
+        self.next_u64() as u8
+    }
+
+    pub fn gen_range(&mut self, min: u16, max: u16) -> u16 {
+        let range = (max - min + 1) as u64;
+        min + (self.next_u64() % range) as u16
+    }
+}
 
 const FIRE_LIFE_MIN: u16 = 60;
 const FIRE_LIFE_MAX: u16 = 100;
@@ -151,16 +186,25 @@ fn activate_chunk_neighborhood(
     }
 }
 
-fn rand_life(m: Material) -> u16 {
-    match m {
-        Fire => rand_range(FIRE_LIFE_MIN, FIRE_LIFE_MAX),
-        Ember => rand_range(EMBER_LIFE_MIN, EMBER_LIFE_MAX),
-        Steam => rand_range(STEAM_LIFE_MIN, STEAM_LIFE_MAX),
-        Smoke => rand_range(SMOKE_LIFE_MIN, SMOKE_LIFE_MAX),
-        _ => 0,
+impl World {
+    pub(crate) fn rand_life(&mut self, m: Material) -> u16 {
+        match m {
+            Fire => self.rand_range(FIRE_LIFE_MIN, FIRE_LIFE_MAX),
+            Ember => self.rand_range(EMBER_LIFE_MIN, EMBER_LIFE_MAX),
+            Steam => self.rand_range(STEAM_LIFE_MIN, STEAM_LIFE_MAX),
+            Smoke => self.rand_range(SMOKE_LIFE_MIN, SMOKE_LIFE_MAX),
+            _ => 0,
+        }
     }
-}
 
-fn rand_range(min: u16, max: u16) -> u16 {
-    rand::thread_rng().gen_range(min..=max)
+    pub(crate) fn rand_range(&mut self, min: u16, max: u16) -> u16 {
+        self.prng.gen_range(min, max)
+    }
+
+    /// Generate a random life via `rand_range` then call `put`.  Splitting the
+    /// borrow across two statements avoids E0499 nested-mutable-borrow errors.
+    pub(crate) fn put_rand_range(&mut self, i: usize, m: Material, min: u16, max: u16) {
+        let life = self.rand_range(min, max);
+        self.put(i, m, life);
+    }
 }
