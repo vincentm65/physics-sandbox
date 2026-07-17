@@ -108,6 +108,29 @@ const MAX_VELOCITY: i8 = 4;
 const VELOCITY_SCALE: i8 = 4;
 const GRAVITY_PER_TICK: i8 = 1;
 
+/// Linear blast falloff in milli-units (1000 at epicentre, floor 350 at the rim).
+#[inline]
+fn blast_strength(dist2: i32, r2: i32) -> i32 {
+    if dist2 == 0 {
+        1000
+    } else {
+        let linear = (r2 - dist2) * 1000 / r2.max(1);
+        linear.max(350)
+    }
+}
+
+/// Combine whole+frac velocity, apply `delta` quarter-cell units, clamp, split.
+#[inline]
+fn apply_fixed_velocity(v: i8, v_frac: i8, delta: i8) -> (i8, i8) {
+    let fixed = (v as i16) * (VELOCITY_SCALE as i16) + (v_frac as i16);
+    let max_fixed = (MAX_VELOCITY as i16) * (VELOCITY_SCALE as i16);
+    let new_fixed = (fixed + delta as i16).clamp(-max_fixed, max_fixed);
+    (
+        (new_fixed / VELOCITY_SCALE as i16) as i8,
+        (new_fixed % VELOCITY_SCALE as i16) as i8,
+    )
+}
+
 pub(crate) const ATMOS_SCALE: i16 = 64;
 /// Ambient dry air mass per cell (fixed-point).
 pub(crate) const AMBIENT_AIR_MASS: i16 = ATMOS_SCALE;

@@ -694,21 +694,17 @@ impl World {
 
     /// Apply a horizontal impulse to `vx_frac` (quarter‑cell units).
     pub(super) fn apply_horizontal_impulse(&mut self, i: usize, impulse: i8, _m: Material) {
-        let fixed = (self.vx[i] as i16) * (VELOCITY_SCALE as i16) + (self.vx_frac[i] as i16);
-        let max_fixed = (MAX_VELOCITY as i16) * (VELOCITY_SCALE as i16);
-        let new_fixed = (fixed + impulse as i16).clamp(-max_fixed, max_fixed);
-        self.vx[i] = (new_fixed / VELOCITY_SCALE as i16) as i8;
-        self.vx_frac[i] = (new_fixed % VELOCITY_SCALE as i16) as i8;
+        let (vx, vx_frac) = apply_fixed_velocity(self.vx[i], self.vx_frac[i], impulse);
+        self.vx[i] = vx;
+        self.vx_frac[i] = vx_frac;
         self.activate_idx(i);
     }
 
     /// Apply a vertical impulse to `vy_frac` (quarter‑cell units).
     pub(super) fn apply_vertical_impulse(&mut self, i: usize, impulse: i8, _m: Material) {
-        let fixed = (self.vy[i] as i16) * (VELOCITY_SCALE as i16) + (self.vy_frac[i] as i16);
-        let max_fixed = (MAX_VELOCITY as i16) * (VELOCITY_SCALE as i16);
-        let new_fixed = (fixed + impulse as i16).clamp(-max_fixed, max_fixed);
-        self.vy[i] = (new_fixed / VELOCITY_SCALE as i16) as i8;
-        self.vy_frac[i] = (new_fixed % VELOCITY_SCALE as i16) as i8;
+        let (vy, vy_frac) = apply_fixed_velocity(self.vy[i], self.vy_frac[i], impulse);
+        self.vy[i] = vy;
+        self.vy_frac[i] = vy_frac;
         self.activate_idx(i);
     }
 

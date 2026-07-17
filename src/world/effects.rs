@@ -29,12 +29,7 @@ impl World {
             }
 
             // Linear falloff with a floor so cells near the radius edge still hit.
-            let strength = if dist2 == 0 {
-                1000
-            } else {
-                let linear = (r2 - dist2) * 1000 / r2.max(1);
-                linear.max(350)
-            };
+            let strength = blast_strength(dist2, r2);
             let damage = ((profile.damage as i32 * strength) / 1000) as u8;
             let impulse = ((profile.impulse as i32 * strength) / 1000).clamp(0, 16) as i8;
             let heat = ((profile.heat as i32 * strength) / 1000) as i16;

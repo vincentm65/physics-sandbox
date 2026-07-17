@@ -238,10 +238,8 @@ impl World {
         let Some(f) = force else { return };
 
         // Combine vy and vy_frac into fixed velocity, add force, clamp, and split back.
-        let fixed = (self.vy[i] as i16) * (VELOCITY_SCALE as i16) + (self.vy_frac[i] as i16);
-        let max_fixed = (MAX_VELOCITY as i16) * (VELOCITY_SCALE as i16);
-        let new_fixed = (fixed + f as i16).clamp(-max_fixed, max_fixed);
-        self.vy[i] = (new_fixed / VELOCITY_SCALE as i16) as i8;
-        self.vy_frac[i] = (new_fixed % VELOCITY_SCALE as i16) as i8;
+        let (vy, vy_frac) = apply_fixed_velocity(self.vy[i], self.vy_frac[i], f);
+        self.vy[i] = vy;
+        self.vy_frac[i] = vy_frac;
     }
 }
