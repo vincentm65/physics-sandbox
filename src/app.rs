@@ -265,6 +265,82 @@ pub(crate) struct LinePreviewCache {
     cells: HashSet<(i32, i32)>,
 }
 
+/// Fields that affect the status bar string. Compared field-wise so the hit
+/// path avoids allocating a new key each frame.
+#[derive(Debug, Clone)]
+struct StatusKey {
+    selected: Material,
+    tool: EditorTool,
+    brush_shape: BrushShape,
+    brush: usize,
+    brush_erase: bool,
+    mirror: Option<MirrorAxis>,
+    dirty: bool,
+    paused: bool,
+    atmos_overlay: AtmosOverlay,
+    mouse_world: Option<(i32, i32)>,
+    pasting: bool,
+    has_selection: bool,
+    scene_name: String,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct StatusCache {
+    key: Option<StatusKey>,
+    text: String,
+}
+
+/// Viewport-local paint-preview / selection flags built once per frame.
+/// bit0 = brush/shape preview, bit1 = selection outline.
+#[derive(Debug)]
+pub(crate) struct ViewportOverlayMask {
+    cam_x: i32,
+    cam_y: i32,
+    width: usize,
+    height: usize,
+    flags: Vec<u8>,
+}
+
+impl ViewportOverlayMask {
+    #[inline]
+    pub(crate) fn preview(&self, wx: i32, wy: i32) -> bool {
+        self.flag(wx, wy, 0x1)
+    }
+
+    #[inline]
+    pub(crate) fn selection(&self, wx: i32, wy: i32) -> bool {
+        self.flag(wx, wy, 0x2)
+    }
+
+    #[inline]
+    fn flag(&self, wx: i32, wy: i32, bit: u8) -> bool {
+        let x = wx - self.cam_x;
+        let y = wy - self.cam_y;
+        if x < 0 || y < 0 {
+            return false;
+        }
+        let (x, y) = (x as usize, y as usize);
+        if x >= self.width || y >= self.height {
+            return false;
+        }
+        self.flags[y * self.width + x] & bit != 0
+    }
+
+    #[inline]
+    fn mark(&mut self, wx: i32, wy: i32, bit: u8) {
+        let x = wx - self.cam_x;
+        let y = wy - self.cam_y;
+        if x < 0 || y < 0 {
+            return;
+        }
+        let (x, y) = (x as usize, y as usize);
+        if x >= self.width || y >= self.height {
+            return;
+        }
+        self.flags[y * self.width + x] |= bit;
+    }
+}
+
 #[derive(Debug)]
 struct Run<T> {
     value: T,
@@ -510,6 +586,7 @@ pub struct App {
     pub dirty: bool,
     pub status: StatusState,
     pub(crate) line_preview_cache: RefCell<LinePreviewCache>,
+    pub(crate) status_cache: RefCell<StatusCache>,
     /// Compressed undo snapshots.
     pub undo_stack: Vec<UndoState>,
     /// Compressed redo snapshots.
@@ -548,6 +625,7 @@ impl Default for App {
             dirty: false,
             status: StatusState::default(),
             line_preview_cache: RefCell::new(LinePreviewCache::default()),
+            status_cache: RefCell::new(StatusCache::default()),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
         }
@@ -1609,6 +1687,195 @@ impl App {
             EditorTool::Line => line_contains(start, end, self.brush + 1, x, y),
             EditorTool::Select => x == min_x || x == max_x || y == min_y || y == max_y,
         }
+    }
+
+    /// Cached status-bar text. Rebuilds only when fields that affect the string change.
+    pub(crate) fn status_text(&self) -> Ref<'_, str> {
+        let key = StatusKey {
+            selected: self.selected,
+            tool: self.tool,
+            brush_shape: self.brush_shape,
+            brush: self.brush,
+            brush_erase: self.brush_erase,
+            mirror: self.mirror,
+            dirty: self.dirty,
+            paused: self.paused,
+            atmos_overlay: self.atmos_overlay,
+            mouse_world: self.mouse_world,
+            pasting: self.pasting,
+            has_selection: self.selection.is_some(),
+            scene_name: self.scene_name.clone(),
+        };
+        let hit = self
+            .status_cache
+            .borrow()
+            .key
+            .as_ref()
+            .is_some_and(|cached| {
+                cached.selected == key.selected
+                    && cached.tool == key.tool
+                    && cached.brush_shape == key.brush_shape
+                    && cached.brush == key.brush
+                    && cached.brush_erase == key.brush_erase
+                    && cached.mirror == key.mirror
+                    && cached.dirty == key.dirty
+                    && cached.paused == key.paused
+                    && cached.atmos_overlay == key.atmos_overlay
+                    && cached.mouse_world == key.mouse_world
+                    && cached.pasting == key.pasting
+                    && cached.has_selection == key.has_selection
+                    && cached.scene_name == key.scene_name
+            });
+        if !hit {
+            let erase = if key.brush_erase { " · Erase" } else { "" };
+            let mirror = key
+                .mirror
+                .map(|axis| format!(" · {}", axis.name()))
+                .unwrap_or_default();
+            let dirty = if key.dirty { " ●" } else { "" };
+            let paused = if key.paused { "Paused" } else { "Running" };
+            let overlay = format!(" · Overlay {}", key.atmos_overlay.name());
+            let coords = key
+                .mouse_world
+                .map(|(x, y)| format!(" · {x},{y}"))
+                .unwrap_or_default();
+            let controls = if key.pasting {
+                "Click Paste · Esc Cancel"
+            } else if key.has_selection {
+                "Ctrl+C Copy · Ctrl+X Cut · Del Delete · Esc Brush"
+            } else {
+                "Tab Materials · E Tools · B Brush · S Scenes · A Air · O Overlay · Space Pause · Wheel Zoom · Esc Quit"
+            };
+            let text = format!(
+                "  ▀ {} · {} {} r{}{}{} · {}{} · {}{}{}  │  {}",
+                key.selected.name(),
+                key.tool.name(),
+                key.brush_shape.name(),
+                key.brush,
+                erase,
+                mirror,
+                key.scene_name,
+                dirty,
+                paused,
+                overlay,
+                coords,
+                controls,
+            );
+            let mut cache = self.status_cache.borrow_mut();
+            cache.text = text;
+            cache.key = Some(key);
+        }
+        Ref::map(self.status_cache.borrow(), |cache| cache.text.as_str())
+    }
+
+    /// Build a viewport-sized mask of brush/shape previews and selection outline.
+    /// Call once per frame so `draw_grid` can O(1) flag lookups instead of
+    /// re-running geometry tests for every terminal cell.
+    pub(crate) fn build_viewport_overlay_mask(
+        &self,
+        cam_x: i32,
+        cam_y: i32,
+        width: usize,
+        height: usize,
+        world_width: usize,
+        world_height: usize,
+    ) -> ViewportOverlayMask {
+        let mut mask = ViewportOverlayMask {
+            cam_x,
+            cam_y,
+            width,
+            height,
+            flags: vec![0; width.saturating_mul(height)],
+        };
+        if width == 0 || height == 0 {
+            return mask;
+        }
+
+        let line_preview = self.line_preview_cells();
+        let shape_active = self.tool != EditorTool::Brush
+            && self.editor_start.is_some()
+            && self.editor_end.is_some();
+        let select_drag = self.tool == EditorTool::Select && shape_active;
+        let shape_preview_active = shape_active && self.tool != EditorTool::Select;
+
+        let shape_contains = |x: i32, y: i32| -> bool {
+            if let Some(cells) = line_preview.as_ref() {
+                cells.contains(&(x, y))
+            } else {
+                self.preview_contains(x, y)
+            }
+        };
+
+        // Brush / non-select shape preview (bit 0).
+        if self.tool == EditorTool::Brush {
+            // Only evaluate the brush footprint (and mirror) instead of every viewport cell.
+            if !(self.pasting
+                || self.brush_options_open
+                || self.picker.picker_open
+                || self.picker.tool_picker_open
+                || self.scene_menu.open
+                || self.status.confirm != Confirm::None)
+                && let Some((cx, cy)) = self.mouse_world
+            {
+                let radius = self.brush as i32;
+                let mark_brush = |mask: &mut ViewportOverlayMask, center_x: i32, center_y: i32| {
+                    for dy in -radius..=radius {
+                        for dx in -radius..=radius {
+                            if brush_offset_contains(self.brush_shape, radius, dx, dy) {
+                                mask.mark(center_x + dx, center_y + dy, 0x1);
+                            }
+                        }
+                    }
+                };
+                mark_brush(&mut mask, cx, cy);
+                match self.mirror {
+                    Some(MirrorAxis::Horizontal) => {
+                        mark_brush(&mut mask, world_width as i32 - 1 - cx, cy);
+                    }
+                    Some(MirrorAxis::Vertical) => {
+                        mark_brush(&mut mask, cx, world_height as i32 - 1 - cy);
+                    }
+                    None => {}
+                }
+            }
+        } else if shape_preview_active {
+            for y in 0..height {
+                let wy = cam_y + y as i32;
+                for x in 0..width {
+                    let wx = cam_x + x as i32;
+                    if shape_contains(wx, wy) {
+                        mask.flags[y * width + x] |= 0x1;
+                    }
+                }
+            }
+        }
+
+        // Selection outline (bit 1): committed selection rect + live select drag.
+        if let Some((start, end)) = self.selection {
+            let (min_x, max_x) = (start.0.min(end.0), start.0.max(end.0));
+            let (min_y, max_y) = (start.1.min(end.1), start.1.max(end.1));
+            for x in min_x..=max_x {
+                mask.mark(x, min_y, 0x2);
+                mask.mark(x, max_y, 0x2);
+            }
+            for y in min_y..=max_y {
+                mask.mark(min_x, y, 0x2);
+                mask.mark(max_x, y, 0x2);
+            }
+        }
+        if select_drag {
+            for y in 0..height {
+                let wy = cam_y + y as i32;
+                for x in 0..width {
+                    let wx = cam_x + x as i32;
+                    if shape_contains(wx, wy) {
+                        mask.flags[y * width + x] |= 0x2;
+                    }
+                }
+            }
+        }
+
+        mask
     }
 
     /// Click inside the popup selects that material; click outside closes it.

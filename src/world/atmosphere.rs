@@ -15,6 +15,15 @@ pub(super) fn cell_is_passable(m: Material) -> bool {
     m.is_empty() || m.is_gas()
 }
 
+/// Whether a material responds to pressure-gradient forces.
+#[inline]
+fn pressure_responsive(m: Material) -> bool {
+    m.is_gas()
+        || matches!(m, Fire | Smoke | Steam | Ember | FireworkSpark)
+        || m.is_liquid()
+        || matches!(m, Sand | BrokenGlass | Ash | Salt | Gunpowder | Coal)
+}
+
 // ── Transport helpers ─────────────────────────────────────────────────────
 
 /// Clamp a value to [0, MAX_AIR_MASS].
@@ -646,7 +655,7 @@ impl World {
                         let i = self.idx(x, y);
                         let m = self.grid[i];
                         // Only apply to materials that respond to pressure.
-                        if !self.pressure_responsive(m) {
+                        if !pressure_responsive(m) {
                             continue;
                         }
                         if !cell_is_passable(m) && !m.is_fluid() {
@@ -682,14 +691,6 @@ impl World {
                 }
             }
         }
-    }
-
-    /// Whether a material responds to pressure‑gradient forces.
-    fn pressure_responsive(&self, m: Material) -> bool {
-        m.is_gas()
-            || matches!(m, Fire | Smoke | Steam | Ember | FireworkSpark)
-            || m.is_liquid()
-            || matches!(m, Sand | BrokenGlass | Ash | Salt | Gunpowder | Coal)
     }
 
     /// Apply a horizontal impulse to `vx_frac` (quarter‑cell units).

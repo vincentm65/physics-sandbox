@@ -138,13 +138,25 @@ fn draw_grid(frame: &mut Frame, world: &World, app: &App, area: &Rect) {
     let grid_rows = area.height as usize;
     let tick = world.tick();
     let preview_color = app.preview_color(tick);
-    let line_preview = app.line_preview_cells();
-    let shape_preview_contains = |x, y| {
-        line_preview.as_ref().map_or_else(
-            || app.preview_contains(x, y),
-            |cells| cells.contains(&(x, y)),
-        )
+    // World cells covered by the terminal grid (zoom 1 packs 2 world rows per cell).
+    let view_w = if app.viewport.zoom == 2 {
+        (area.width as usize).div_ceil(2)
+    } else {
+        area.width as usize
     };
+    let view_h = if app.viewport.zoom == 2 {
+        grid_rows
+    } else {
+        grid_rows.saturating_mul(2)
+    };
+    let overlay = app.build_viewport_overlay_mask(
+        app.viewport.camera.0,
+        app.viewport.camera.1,
+        view_w,
+        view_h,
+        world.width,
+        world.height,
+    );
     for cy in 0..grid_rows {
         for cx in 0..area.width as usize {
             let (wx, top_y, bottom_y) = if app.viewport.zoom == 2 {
@@ -200,13 +212,8 @@ fn draw_grid(frame: &mut Frame, world: &World, app: &App, area: &Rect) {
                 cell.set_char(' ');
                 cell.set_bg(top_color);
             }
-            let brush_preview = app.brush_preview_contains(wx, top_y, world.width, world.height);
-            let shape_preview = app.tool != EditorTool::Select && shape_preview_contains(wx, top_y);
-            let selected = brush_preview || shape_preview;
-            let selected_bottom = bottom_y.is_some_and(|y| {
-                app.brush_preview_contains(wx, y, world.width, world.height)
-                    || (app.tool != EditorTool::Select && shape_preview_contains(wx, y))
-            });
+            let selected = overlay.preview(wx, top_y);
+            let selected_bottom = bottom_y.is_some_and(|y| overlay.preview(wx, y));
             if selected {
                 if app.viewport.zoom == 2 {
                     cell.set_bg(preview_color);
@@ -218,12 +225,8 @@ fn draw_grid(frame: &mut Frame, world: &World, app: &App, area: &Rect) {
                 cell.set_bg(preview_color);
             }
 
-            let selection_top = app.selection_contains(wx, top_y)
-                || (app.tool == EditorTool::Select && shape_preview_contains(wx, top_y));
-            let selection_bottom = bottom_y.is_some_and(|y| {
-                app.selection_contains(wx, y)
-                    || (app.tool == EditorTool::Select && shape_preview_contains(wx, y))
-            });
+            let selection_top = overlay.selection(wx, top_y);
+            let selection_bottom = bottom_y.is_some_and(|y| overlay.selection(wx, y));
             if selection_top {
                 if app.viewport.zoom == 2 {
                     cell.set_bg(Color::White);
@@ -238,48 +241,10 @@ fn draw_grid(frame: &mut Frame, world: &World, app: &App, area: &Rect) {
     }
 }
 
-/// Build the unified status text (without rendering it).
-fn status_text(app: &App) -> String {
-    let erase = if app.brush_erase { " · Erase" } else { "" };
-    let mirror = app
-        .mirror
-        .map(|axis| format!(" · {}", axis.name()))
-        .unwrap_or_default();
-    let dirty = if app.dirty { " ●" } else { "" };
-    let paused = if app.paused { "Paused" } else { "Running" };
-    let overlay = format!(" · Overlay {}", app.atmos_overlay.name());
-    let coords = app
-        .mouse_world
-        .map(|(x, y)| format!(" · {x},{y}"))
-        .unwrap_or_default();
-    let controls = if app.pasting {
-        "Click Paste · Esc Cancel"
-    } else if app.selection.is_some() {
-        "Ctrl+C Copy · Ctrl+X Cut · Del Delete · Esc Brush"
-    } else {
-        "Tab Materials · E Tools · B Brush · S Scenes · A Air · O Overlay · Space Pause · Wheel Zoom · Esc Quit"
-    };
-    format!(
-        "  ▀ {} · {} {} r{}{}{} · {}{} · {}{}{}  │  {}",
-        app.selected.name(),
-        app.tool.name(),
-        app.brush_shape.name(),
-        app.brush,
-        erase,
-        mirror,
-        app.scene_name,
-        dirty,
-        paused,
-        overlay,
-        coords,
-        controls,
-    )
-}
-
 /// How many terminal rows the status bar needs (capped at `MAX_STATUS_ROWS`).
 pub(crate) fn status_rows(app: &App, terminal_width: u16) -> u16 {
     let w = terminal_width.max(1) as usize;
-    let chars = status_text(app).chars().count();
+    let chars = app.status_text().chars().count();
     let needed = chars.div_ceil(w);
     (needed as u16).clamp(1, MAX_STATUS_ROWS)
 }
@@ -328,7 +293,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: &Rect, status_rows: u16) {
         return;
     }
 
-    let s = status_text(app);
+    let s = app.status_text();
 
     // print wrapped text across status_rows
     for (i, ch) in s.chars().enumerate() {
